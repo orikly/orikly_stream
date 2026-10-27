@@ -1,0 +1,64 @@
+name: Build APK
+
+on:
+  push:
+    tags: ['v*']
+  # Через сайт: Actions -> Build APK -> Run workflow -> ввести версию (например 0.1.0).
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version, e.g. 0.1.0 (creates release v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Secret KEYSTORE_BASE64 is missing"; exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build release APK
+        env:
+          SIGNING_STORE_FILE: ${{ runner.temp }}/release.jks
+          SIGNING_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          STREAM_KEY: ${{ secrets.STREAM_KEY }}
+          VERSION_CODE: ${{ github.run_number }}
+          VERSION_NAME: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+        run: |
+          if [ -z "$STREAM_KEY" ]; then
+            echo "::error::Secret STREAM_KEY is missing"; exit 1
+          fi
+          bash ./gradlew --no-daemon assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk orikly-quest-stream.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orikly-quest-stream
+          path: orikly-quest-stream.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+          make_latest: true
+          files: orikly-quest-stream.apk
