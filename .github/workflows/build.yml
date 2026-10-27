@@ -16,6 +16,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Проект лежит в подпапке репозитория, а не в корне.
+    defaults:
+      run:
+        working-directory: orikly-pack/orikly-quest-stream
     steps:
       - uses: actions/checkout@v4
 
@@ -54,11 +58,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: orikly-quest-stream
-          path: orikly-quest-stream.apk
+          path: orikly-pack/orikly-quest-stream/orikly-quest-stream.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
           make_latest: true
-          files: orikly-quest-stream.apk
+          files: orikly-pack/orikly-quest-stream/orikly-quest-stream.apk
