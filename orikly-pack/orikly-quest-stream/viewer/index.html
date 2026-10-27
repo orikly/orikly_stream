@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orikly Class View</title>
+<script>
+// ======================= CONFIG =======================
+const CONFIG = {
+  port: 8080,
+  key: "CHANGE_ME",          // same as STREAM_KEY secret in GitHub
+  fps: 10,                   // recording frame rate
+  videoBitsPerSecond: 1000000,
+  devices: [
+    { name: "Q3-01", ip: "192.168.1.101" },
+    { name: "Q3-02", ip: "192.168.1.102" },
+    { name: "Q3-03", ip: "192.168.1.103" },
+    { name: "Q3-04", ip: "192.168.1.104" },
+    { name: "Q3-05", ip: "192.168.1.105" },
+    { name: "Q3-06", ip: "192.168.1.106" },
+    { name: "Q3-07", ip: "192.168.1.107" },
+    { name: "Q3-08", ip: "192.168.1.108" },
+    { name: "Q3-09", ip: "192.168.1.109" },
+    { name: "Q3-10", ip: "192.168.1.110" },
+  ],
+};
+// ======================================================
+</script>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1b1d21; --muted: #6b7280;
+    --border: #d9dce1; --accent: #2563eb; --ok: #16a34a; --bad: #dc2626; --rec: #dc2626;
+    --tile: #000;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111316; --panel: #1b1e23; --text: #e8eaed; --muted: #9aa0a6;
+      --border: #30343a; --accent: #60a5fa; --ok: #4ade80; --bad: #f87171; --rec: #ef4444;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+           padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+           position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
+           background: var(--panel); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+  .muted { color: var(--muted); }
+  label { display: inline-flex; gap: 6px; align-items: center; }
+  main { display: grid; gap: 12px; padding: 16px;
+         grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  @media (min-width: 1300px) { main { grid-template-columns: repeat(5, 1fr); } }
+  .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+          display: flex; flex-direction: column; }
+  .screen { position: relative; aspect-ratio: 1 / 1; background: var(--tile); cursor: zoom-in; }
+  .screen canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .screen .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+                     color: #bbb; font-size: 13px; text-align: center; padding: 12px; pointer-events: none; }
+  .rec { position: absolute; top: 8px; left: 8px; background: var(--rec); color: #fff; font-size: 11px;
+         font-weight: 700; padding: 2px 6px; border-radius: 4px; display: none; }
+  .tile.recording .rec { display: block; }
+  .meta { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .name { font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .info { font-size: 12px; }
+  /* expanded view */
+  .tile.expanded { position: fixed; inset: 0; z-index: 10; border-radius: 0; border: 0; }
+  .tile.expanded .screen { flex: 1; aspect-ratio: auto; cursor: zoom-out; }
+  dialog { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--text);
+           padding: 16px; width: min(560px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0,0,0,.5); }
+  dialog h2 { margin: 0 0 12px; font-size: 16px; }
+  dialog input[type=text] { font: inherit; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px;
+                            background: var(--bg); color: var(--text); width: 100%; }
+  .devrows { display: grid; grid-template-columns: 1fr 1.4fr; gap: 6px; margin: 8px 0 14px; max-height: 50vh; overflow: auto; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; }
+  #warn { padding: 8px 16px; background: #fef3c7; color: #78350f; display: none; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) #warn { background: #422006; color: #fde68a; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Orikly Class View</h1>
+  <button id="startAll" class="primary">Start all</button>
+  <button id="stopAll">Stop all</button>
+  <label><input type="checkbox" id="recordToggle" checked> Record</label>
+  <button id="pickFolder">Choose folder…</button>
+  <span id="folderName" class="muted">No folder — recordings will download on stop</span>
+  <button id="openSettings">Settings</button>
+  <span id="summary" class="muted"></span>
+</header>
+<dialog id="settings">
+  <h2>Settings</h2>
+  <label style="display:block">Access key (same as STREAM_KEY)<input type="text" id="setKey" autocomplete="off"></label>
+  <div class="devrows" id="setDevices"></div>
+  <div class="actions"><button id="setCancel">Cancel</button><button id="setSave" class="primary">Save</button></div>
+</dialog>
+<div id="warn"></div>
+<main id="grid"></main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const base = (d) => `http://${d.ip}:${CONFIG.port}`;
+const q = () => `key=${encodeURIComponent(CONFIG.key)}`;
+const enc = new TextEncoder();
+const HEADER_END = enc.encode("\r\n\r\n");
+
+// ---------- recordings folder (remembered between sessions) ----------
+let folder = null;
+
+function idb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("orikly", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("kv");
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function kvGet(k) {
+  try { const db = await idb(); return await new Promise((res) => {
+    const t = db.transaction("kv").objectStore("kv").get(k); t.onsuccess = () => res(t.result); t.onerror = () => res(null); });
+  } catch { return null; }
+}
+async function kvSet(k, v) {
+  try { const db = await idb(); db.transaction("kv", "readwrite").objectStore("kv").put(v, k); } catch {}
+}
+
+function showFolder() {
+  $("folderName").textContent = folder ? `Folder: ${folder.name}` : "No folder — recordings will download on stop";
+}
+async function pickFolder() {
+  if (!window.showDirectoryPicker) { warn("This browser cannot write to a folder. Use Chrome."); return; }
+  try {
+    folder = await showDirectoryPicker({ id: "orikly", mode: "readwrite" });
+    await kvSet("folder", folder);
+    showFolder();
+  } catch {}
+}
+// Called from a click (Start), so Chrome may show the permission prompt.
+async function ensureFolderPermission() {
+  if (!folder) return false;
+  try {
+    if (await folder.queryPermission({ mode: "readwrite" }) === "granted") return true;
+    return await folder.requestPermission({ mode: "readwrite" }) === "granted";
+  } catch { return false; }
+}
+
+function warn(text) { const w = $("warn"); w.textContent = text; w.style.display = text ? "block" : "none"; }
+
+function pickMime() {
+  const types = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+  return types.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
+}
+const stamp = () => {
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+};
+
+// ---------- one headset ----------
+class Tile {
+  constructor(dev) {
+    this.dev = dev;
+    this.active = false;
+    this.abort = null;
+    this.lastFrameAt = 0;
+    this.recorder = null;
+    this.el = document.createElement("div");
+    this.el.className = "tile";
+    this.el.innerHTML = `
+      <div class="screen"><canvas width="480" height="480"></canvas>
+        <div class="overlay">Idle</div><div class="rec">● REC</div></div>
+      <div class="meta">
+        <div class="row"><span class="name"></span><button class="toggle primary">Start</button></div>
+        <div class="row info"><span class="state"><span class="dot"></span><span class="stext">Checking…</span></span>
+          <span class="muted extra"></span></div>
+      </div>`;
+    this.canvas = this.el.querySelector("canvas");
+    this.ctx = this.canvas.getContext("2d");
+    this.overlay = this.el.querySelector(".overlay");
+    this.btn = this.el.querySelector(".toggle");
+    this.dot = this.el.querySelector(".dot");
+    this.stext = this.el.querySelector(".stext");
+    this.extra = this.el.querySelector(".extra");
+    this.el.querySelector(".name").textContent = `${dev.name} · ${dev.ip}`;
+    this.btn.onclick = () => (this.active ? this.stop() : this.start($("recordToggle").checked));
+    this.el.querySelector(".screen").onclick = () => toggleExpand(this);
+    this.blank();
+  }
+
+  blank() {
+    this.ctx.fillStyle = "#000";
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+  }
+
+  setState(kind, text) {
+    this.dot.className = "dot" + (kind === "ok" ? " ok" : kind === "bad" ? " bad" : "");
+    this.stext.textContent = text;
+  }
+
+  async start(record) {
+    if (this.active) return;
+    this.active = true;
+    this.btn.textContent = "Stop";
+    this.btn.className = "toggle danger";
+    this.overlay.textContent = "Connecting…";
+    // Permission must be asked inside the click; recording itself starts on the first frame,
+    // so the video gets the real frame size from the start.
+    this.wantRecord = record;
+    this.canWriteFolder = record && (await ensureFolderPermission());
+    this.connect();
+    updateSummary();
+  }
+
+  async stop() {
+    this.active = false;
+    this.wantRecord = false;
+    this.abort?.abort();
+    this.abort = null;
+    this.btn.textContent = "Start";
+    this.btn.className = "toggle primary";
+    this.overlay.textContent = "Idle";
+    await this.stopRecording();
+    updateSummary();
+  }
+
+  // MJPEG via fetch: we parse frames ourselves, so the canvas stays recordable.
+  async connect() {
+    if (!this.active) return;
+    const ctrl = new AbortController();
+    this.abort = ctrl;
+    try {
+      const res = await fetch(`${base(this.dev)}/stream?${q()}`, { signal: ctrl.signal, cache: "no-store" });
+      if (res.status === 403) throw new Error("Wrong key");
+      if (res.status === 503) throw new Error("Too many viewers");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const reader = res.body.getReader();
+      let buf = new Uint8Array(0);
+      this.lastFrameAt = Date.now();
+      this.watchdog(ctrl);
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf = concat(buf, value);
+        let frame;
+        while ((frame = takeFrame(buf))) {
+          buf = frame.rest;
+          if (frame.jpeg) await this.draw(frame.jpeg);
+        }
+      }
+      throw new Error("Stream ended");
+    } catch (e) {
+      if (ctrl.signal.aborted && !this.active) return; // stopped by us
+      this.setState("bad", e.name === "TypeError" ? "No connection" : e.message);
+      this.overlay.textContent = "No connection — retrying…";
+    }
+    if (this.active && this.abort === ctrl) setTimeout(() => this.connect(), 3000);
+  }
+
+  watchdog(ctrl) {
+    const t = setInterval(() => {
+      if (ctrl.signal.aborted || this.abort !== ctrl) return clearInterval(t);
+      if (Date.now() - this.lastFrameAt > 5000) { clearInterval(t); ctrl.abort(); }
+    }, 1000);
+  }
+
+  async draw(jpeg) {
+    this.lastFrameAt = Date.now();
+    try {
+      const bmp = await createImageBitmap(new Blob([jpeg], { type: "image/jpeg" }));
+      if (this.canvas.width !== bmp.width || this.canvas.height !== bmp.height) {
+        // Size change only before recording starts would be ideal; recorder keeps working anyway.
+        this.canvas.width = bmp.width; this.canvas.height = bmp.height;
+      }
+      this.ctx.drawImage(bmp, 0, 0);
+      bmp.close();
+      this.overlay.textContent = "";
+      this.setState("ok", "Streaming");
+      if (this.wantRecord && !this.recorder && !this.startingRec) {
+        this.startingRec = true;
+        this.startRecording().finally(() => { this.startingRec = false; updateSummary(); });
+      }
+    } catch {}
+  }
+
+  async startRecording() {
+    const mime = pickMime();
+    if (!mime) { warn("This browser cannot record video. Use Chrome."); return; }
+    const ext = mime.startsWith("video/mp4") ? "mp4" : "webm";
+    const fileName = `${this.dev.name}_${stamp()}.${ext}`;
+    const stream = this.canvas.captureStream(CONFIG.fps);
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: CONFIG.videoBitsPerSecond });
+    const job = { rec, fileName, mime, chunks: [], writable: null, queue: Promise.resolve() };
+
+    if (this.canWriteFolder) {
+      try {
+        const fh = await folder.getFileHandle(fileName, { create: true });
+        job.writable = await fh.createWritable();
+      } catch (e) { warn(`Cannot write to folder: ${e.message}. Recording in memory instead.`); }
+    }
+    rec.ondataavailable = (e) => {
+      if (!e.data || !e.data.size) return;
+      if (job.writable) job.queue = job.queue.then(() => job.writable.write(e.data)).catch(() => {});
+      else job.chunks.push(e.data);
+    };
+    job.done = new Promise((res) => (rec.onstop = res));
+    if (!this.active) { job.writable?.close().catch(() => {}); return; }
+    rec.start(2000); // flush to disk every 2 s
+    this.recorder = job;
+    this.el.classList.add("recording");
+  }
+
+  async stopRecording() {
+    const job = this.recorder;
+    if (!job) return;
+    this.recorder = null;
+    this.el.classList.remove("recording");
+    if (job.rec.state !== "inactive") job.rec.stop();
+    await job.done;
+    if (job.writable) {
+      await job.queue;
+      await job.writable.close().catch(() => {});
+    } else if (job.chunks.length) {
+      const url = URL.createObjectURL(new Blob(job.chunks, { type: job.mime }));
+      const a = Object.assign(document.createElement("a"), { href: url, download: job.fileName });
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+  }
+
+  async pollStatus() {
+    try {
+      const r = await fetch(`${base(this.dev)}/status?${q()}`, { cache: "no-store", signal: AbortSignal.timeout(3000) });
+      if (r.status === 403) { this.setState("bad", "Wrong key"); this.extra.textContent = ""; return; }
+      const s = await r.json();
+      const parts = [];
+      if (s.battery != null) parts.push(`🔋 ${s.battery}%`);
+      if (s.rssi != null) parts.push(`📶 ${s.rssi} dBm`);
+      this.extra.textContent = parts.join("  ");
+      if (!this.active) this.setState("ok", s.capturing ? "Online · ready" : "Online · not capturing");
+    } catch {
+      this.extra.textContent = "";
+      if (!this.active || Date.now() - this.lastFrameAt > 5000)
+        this.setState("bad", "Offline — open app on headset");
+    }
+  }
+}
+
+function concat(a, b) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a); out.set(b, a.length);
+  return out;
+}
+function indexOf(buf, pat, from = 0) {
+  outer: for (let i = from; i <= buf.length - pat.length; i++) {
+    for (let j = 0; j < pat.length; j++) if (buf[i + j] !== pat[j]) continue outer;
+    return i;
+  }
+  return -1;
+}
+// One multipart part: headers with Content-Length, blank line, JPEG bytes.
+function takeFrame(buf) {
+  const h = indexOf(buf, HEADER_END);
+  if (h < 0) return null;
+  const head = new TextDecoder().decode(buf.subarray(0, h));
+  const m = /content-length:\s*(\d+)/i.exec(head);
+  if (!m) return { jpeg: null, rest: buf.subarray(h + 4) }; // skip junk without length
+  const len = +m[1], start = h + 4;
+  if (buf.length < start + len) return null;
+  const jpeg = buf.slice(start, start + len);
+  return { jpeg, rest: buf.subarray(start + len) };
+}
+
+// ---------- settings saved in this browser (override CONFIG above) ----------
+try {
+  const saved = JSON.parse(localStorage.getItem("orikly-config") || "null");
+  if (saved?.key) CONFIG.key = saved.key;
+  if (Array.isArray(saved?.devices) && saved.devices.length) CONFIG.devices = saved.devices;
+} catch {}
+
+function openSettings() {
+  $("setKey").value = CONFIG.key === "CHANGE_ME" ? "" : CONFIG.key;
+  const box = $("setDevices");
+  box.innerHTML = "<span class='muted'>Name</span><span class='muted'>IP address</span>";
+  CONFIG.devices.forEach((d) => {
+    for (const [cls, val] of [["n", d.name], ["i", d.ip]]) {
+      const inp = Object.assign(document.createElement("input"), { type: "text", value: val, className: cls });
+      box.appendChild(inp);
+    }
+  });
+  $("settings").showModal();
+}
+function saveSettings() {
+  const names = [...document.querySelectorAll("#setDevices input.n")].map((i) => i.value.trim());
+  const ips = [...document.querySelectorAll("#setDevices input.i")].map((i) => i.value.trim());
+  const devices = names.map((name, k) => ({ name, ip: ips[k] })).filter((d) => d.name && d.ip);
+  if (tiles.some((t) => t.recorder) && !confirm("Recording is running. Stop it and apply settings?")) return;
+  try {
+    localStorage.setItem("orikly-config", JSON.stringify({ key: $("setKey").value.trim(), devices }));
+  } catch { alert("Cannot save settings in this browser."); return; }
+  Promise.all(tiles.map((t) => t.stop())).then(() => location.reload());
+}
+
+// ---------- page ----------
+const tiles = CONFIG.devices.map((d) => new Tile(d));
+tiles.forEach((t) => $("grid").appendChild(t.el));
+
+let expanded = null;
+function toggleExpand(tile) {
+  if (expanded) expanded.el.classList.remove("expanded");
+  expanded = expanded === tile ? null : tile;
+  if (expanded) expanded.el.classList.add("expanded");
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && expanded) toggleExpand(expanded); });
+
+function updateSummary() {
+  const live = tiles.filter((t) => t.active).length;
+  const rec = tiles.filter((t) => t.recorder).length;
+  $("summary").textContent = live ? `Active: ${live} · Recording: ${rec}` : "";
+}
+
+$("startAll").onclick = async () => {
+  const record = $("recordToggle").checked;
+  if (record) await ensureFolderPermission(); // ask once for all tiles
+  tiles.forEach((t) => t.start(record));
+};
+$("stopAll").onclick = () => tiles.forEach((t) => t.stop());
+$("pickFolder").onclick = pickFolder;
+$("openSettings").onclick = openSettings;
+$("setCancel").onclick = () => $("settings").close();
+$("setSave").onclick = saveSettings;
+
+// Finish files properly if the page is closed while recording.
+window.addEventListener("beforeunload", (e) => {
+  if (tiles.some((t) => t.recorder)) { e.preventDefault(); e.returnValue = ""; }
+});
+
+(async () => {
+  if (!CONFIG.key || CONFIG.key === "CHANGE_ME") warn("Open Settings and enter the access key (same as the STREAM_KEY secret).");
+  folder = (await kvGet("folder")) || null;
+  showFolder();
+  const poll = () => tiles.forEach((t) => t.pollStatus());
+  poll();
+  setInterval(poll, 10000);
+})();
+</script>
+</body>
+</html>
