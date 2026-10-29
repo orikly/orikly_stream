@@ -235,7 +235,8 @@ class Tile {
     const ctrl = new AbortController();
     this.abort = ctrl;
     try {
-      const res = await fetch(`${base(this.dev)}/stream?${q()}`, { signal: ctrl.signal, cache: "no-store" });
+      const url = `${base(this.dev)}/stream?${q()}${this.hq ? "&hq=1" : ""}`;
+      const res = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
       if (res.status === 403) throw new Error("Wrong key");
       if (res.status === 503) throw new Error("Too many viewers");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -255,7 +256,7 @@ class Tile {
       }
       throw new Error("Stream ended");
     } catch (e) {
-      if (ctrl.signal.aborted && !this.active) return; // stopped by us
+      if (ctrl.signal.aborted && (!this.active || this.abort !== ctrl)) return; // stopped or switched by us
       this.setState("bad", e.name === "TypeError" ? "No connection" : e.message);
       this.overlay.textContent = "No connection — retrying…";
     }
@@ -269,6 +270,13 @@ class Tile {
     }, 1000);
   }
 
+  // Expanded tile asks the headset for the high-quality stream (?hq=1), grid uses the normal one.
+  setHQ(on) {
+    if (this.hq === on) return;
+    this.hq = on;
+    if (this.active) { this.abort?.abort(); this.connect(); }
+  }
+
   async draw(jpeg) {
     this.lastFrameAt = Date.now();
     try {
@@ -278,6 +286,8 @@ class Tile {
         this.canvas.width = bmp.width; this.canvas.height = bmp.height;
       }
       this.ctx.drawImage(bmp, 0, 0);
+      // Recording uses its own canvas with a fixed size, so switching quality does not break the file.
+      if (this.recCanvas) this.recCtx.drawImage(bmp, 0, 0, this.recCanvas.width, this.recCanvas.height);
       bmp.close();
       this.overlay.textContent = "";
       this.setState("ok", "Streaming");
@@ -293,7 +303,12 @@ class Tile {
     if (!mime) { warn("This browser cannot record video. Use Chrome."); return; }
     const ext = mime.startsWith("video/mp4") ? "mp4" : "webm";
     const fileName = `${this.dev.name}_${stamp()}.${ext}`;
-    const stream = this.canvas.captureStream(CONFIG.fps);
+    const h = Math.min(this.canvas.height, 480);
+    const w = Math.round((this.canvas.width * h) / this.canvas.height / 2) * 2;
+    this.recCanvas = Object.assign(document.createElement("canvas"), { width: w, height: h });
+    this.recCtx = this.recCanvas.getContext("2d");
+    this.recCtx.drawImage(this.canvas, 0, 0, w, h);
+    const stream = this.recCanvas.captureStream(CONFIG.fps);
     const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: CONFIG.videoBitsPerSecond });
     const job = { rec, fileName, mime, chunks: [], writable: null, queue: Promise.resolve() };
 
@@ -309,7 +324,7 @@ class Tile {
       else job.chunks.push(e.data);
     };
     job.done = new Promise((res) => (rec.onstop = res));
-    if (!this.active) { job.writable?.close().catch(() => {}); return; }
+    if (!this.active) { job.writable?.close().catch(() => {}); this.recCanvas = null; return; }
     rec.start(2000); // flush to disk every 2 s
     this.recorder = job;
     this.el.classList.add("recording");
@@ -322,6 +337,7 @@ class Tile {
     this.el.classList.remove("recording");
     if (job.rec.state !== "inactive") job.rec.stop();
     await job.done;
+    this.recCanvas = null;
     if (job.writable) {
       await job.queue;
       await job.writable.close().catch(() => {});
@@ -412,9 +428,9 @@ tiles.forEach((t) => $("grid").appendChild(t.el));
 
 let expanded = null;
 function toggleExpand(tile) {
-  if (expanded) expanded.el.classList.remove("expanded");
+  if (expanded) { expanded.el.classList.remove("expanded"); expanded.setHQ(false); }
   expanded = expanded === tile ? null : tile;
-  if (expanded) expanded.el.classList.add("expanded");
+  if (expanded) { expanded.el.classList.add("expanded"); expanded.setHQ(true); }
 }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && expanded) toggleExpand(expanded); });
 
