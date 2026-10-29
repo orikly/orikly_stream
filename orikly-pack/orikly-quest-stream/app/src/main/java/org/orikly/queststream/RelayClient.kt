@@ -144,6 +144,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
 
     private fun helloJson() = JSONObject()
         .put("type", "hello")
+        .put("id", DeviceInfo.id(ctx))
         .put("name", DeviceInfo.name(ctx))
         .put("model", Build.MODEL)
         .put("version", BuildConfig.VERSION_NAME)

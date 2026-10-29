@@ -24,6 +24,10 @@ object DeviceInfo {
         return "${Build.MODEL}-${id.takeLast(4)}"
     }
 
+    /** Уникальный номер устройства: имена у очков могут совпадать (на Quest это часто просто «Quest 3»). */
+    fun id(ctx: Context): String =
+        Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID) ?: ""
+
     fun ip(ctx: Context): String? {
         val cm = ctx.getSystemService(ConnectivityManager::class.java) ?: return null
         val props = cm.getLinkProperties(cm.activeNetwork) ?: return null

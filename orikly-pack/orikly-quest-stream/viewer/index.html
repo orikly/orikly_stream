@@ -111,7 +111,7 @@ const $ = (id) => document.getElementById(id);
 const SERVER_MODE = location.protocol.startsWith("http");
 const base = (d) => `http://${d.ip}:${CONFIG.port}`;
 const streamUrl = (d, hq) => SERVER_MODE
-  ? `/stream/${encodeURIComponent(d.name)}${hq ? "?hq=1" : ""}`
+  ? `/stream/${encodeURIComponent(d.id)}${hq ? "?hq=1" : ""}`
   : `${base(d)}/stream?${q()}${hq ? "&hq=1" : ""}`;
 const q = () => `key=${encodeURIComponent(CONFIG.key)}`;
 const enc = new TextEncoder();
@@ -193,10 +193,26 @@ class Tile {
     this.dot = this.el.querySelector(".dot");
     this.stext = this.el.querySelector(".stext");
     this.extra = this.el.querySelector(".extra");
-    this.el.querySelector(".name").textContent = SERVER_MODE ? dev.name : `${dev.name} · ${dev.ip}`;
+    this.nameEl = this.el.querySelector(".name");
+    this.showTitle();
+    if (SERVER_MODE) {
+      this.nameEl.title = "Click to rename";
+      this.nameEl.style.cursor = "pointer";
+      this.nameEl.onclick = () => renameTile(this);
+    }
     this.btn.onclick = () => (this.active ? this.stop() : this.start($("recordToggle").checked));
     this.el.querySelector(".screen").onclick = () => toggleExpand(this);
     this.blank();
+  }
+
+  // Server mode: own name given on this laptop, else what the server reports.
+  title() {
+    if (!SERVER_MODE) return this.dev.name;
+    return labels()[this.dev.id] || this.dev.label || this.dev.name || this.dev.id;
+  }
+
+  showTitle() {
+    this.nameEl.textContent = SERVER_MODE ? this.title() : `${this.dev.name} · ${this.dev.ip}`;
   }
 
   blank() {
@@ -309,7 +325,8 @@ class Tile {
     const mime = pickMime();
     if (!mime) { warn("This browser cannot record video. Use Chrome."); return; }
     const ext = mime.startsWith("video/mp4") ? "mp4" : "webm";
-    const fileName = `${this.dev.name}_${stamp()}.${ext}`;
+    const safe = this.title().replace(/[\\/:*?"<>|·]+/g, "-").replace(/\s+/g, "_");
+    const fileName = `${safe}_${stamp()}.${ext}`;
     const h = Math.min(this.canvas.height, 480);
     const w = Math.round((this.canvas.width * h) / this.canvas.height / 2) * 2;
     this.recCanvas = Object.assign(document.createElement("canvas"), { width: w, height: h });
@@ -448,14 +465,32 @@ const tiles = [];
 function addTile(dev) {
   const t = new Tile(dev);
   tiles.push(t);
-  tiles.sort((a, b) => a.dev.name.localeCompare(b.dev.name, undefined, { numeric: true }));
-  tiles.forEach((x) => $("grid").appendChild(x.el));
+  sortTiles();
   return t;
+}
+function sortTiles() {
+  tiles.sort((a, b) => a.title().localeCompare(b.title(), undefined, { numeric: true }));
+  tiles.forEach((x) => $("grid").appendChild(x.el));
 }
 if (!SERVER_MODE) CONFIG.devices.forEach(addTile);
 
-// Server mode: headsets appear by themselves; names seen before are kept so their tiles stay in place.
-const KNOWN_KEY = "orikly-known-headsets";
+// Server mode: headsets appear by themselves, identified by a unique id (names can repeat).
+// Headsets seen before are kept so their tiles stay in place; names given here are remembered.
+const KNOWN_KEY = "orikly-known-headsets-v2";
+const LABELS_KEY = "orikly-labels";
+function labels() {
+  try { return JSON.parse(localStorage.getItem(LABELS_KEY) || "{}"); } catch { return {}; }
+}
+function renameTile(tile) {
+  const current = tile.title();
+  const name = prompt("Name for this headset (e.g. Q3-01). Empty = default name.", current);
+  if (name === null) return;
+  const all = labels();
+  if (name.trim()) all[tile.dev.id] = name.trim(); else delete all[tile.dev.id];
+  try { localStorage.setItem(LABELS_KEY, JSON.stringify(all)); } catch {}
+  tile.showTitle();
+  sortTiles();
+}
 async function pollServer() {
   try {
     const list = await (await fetch("/api/devices", { cache: "no-store" })).json();
@@ -463,12 +498,14 @@ async function pollServer() {
     let known = [];
     try { known = JSON.parse(localStorage.getItem(KNOWN_KEY) || "[]"); } catch {}
     for (const info of list) {
-      let t = tiles.find((x) => x.dev.name === info.name);
-      if (!t) t = addTile({ name: info.name });
+      let t = tiles.find((x) => x.dev.id === info.id);
+      if (!t) t = addTile({ id: info.id, name: info.name, label: info.label });
+      if (t.dev.label !== info.label) { Object.assign(t.dev, { name: info.name, label: info.label }); t.showTitle(); sortTiles(); }
       t.applyInfo(info);
-      if (!known.includes(info.name)) known.push(info.name);
+      const k = known.find((x) => x.id === info.id);
+      if (k) k.label = info.label; else known.push({ id: info.id, name: info.name, label: info.label });
     }
-    for (const t of tiles) if (!list.some((i) => i.name === t.dev.name)) t.applyInfo({ online: false });
+    for (const t of tiles) if (!list.some((i) => i.id === t.dev.id)) t.applyInfo({ online: false });
     try { localStorage.setItem(KNOWN_KEY, JSON.stringify(known)); } catch {}
     updateSummary();
   } catch {
@@ -476,7 +513,7 @@ async function pollServer() {
   }
 }
 if (SERVER_MODE) {
-  try { JSON.parse(localStorage.getItem(KNOWN_KEY) || "[]").forEach((name) => addTile({ name })); } catch {}
+  try { JSON.parse(localStorage.getItem(KNOWN_KEY) || "[]").forEach(addTile); } catch {}
   $("openSettings").style.display = "none";
 }
 

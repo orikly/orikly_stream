@@ -36,6 +36,7 @@ type config struct {
 }
 
 type device struct {
+	id   string // unique per headset; names can repeat (often just "Quest 3")
 	name string
 
 	mu        sync.Mutex
@@ -67,13 +68,13 @@ var (
 	}
 )
 
-func (h *hub) get(name string, create bool) *device {
+func (h *hub) get(id string, create bool) *device {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	d := h.devices[name]
+	d := h.devices[id]
 	if d == nil && create {
-		d = &device{name: name, newFrame: make(chan struct{})}
-		h.devices[name] = d
+		d = &device{id: id, newFrame: make(chan struct{})}
+		h.devices[id] = d
 	}
 	return d
 }
@@ -115,7 +116,7 @@ func handlePush(w http.ResponseWriter, r *http.Request) {
 	// First message must be hello with the headset name.
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	var hello struct {
-		Type, Name, Model, Version string
+		Type, ID, Name, Model, Version string
 	}
 	if _, msg, err := conn.ReadMessage(); err != nil || json.Unmarshal(msg, &hello) != nil ||
 		hello.Type != "hello" || strings.TrimSpace(hello.Name) == "" {
@@ -123,18 +124,22 @@ func handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(hello.Name)
-	d := devices.get(name, true)
+	id := strings.TrimSpace(hello.ID)
+	if id == "" {
+		id = name // app before v0.3.1 sends no id
+	}
+	d := devices.get(id, true)
 
 	d.mu.Lock()
 	old := d.conn
 	d.conn = conn
-	d.model, d.version = hello.Model, hello.Version
+	d.name, d.model, d.version = name, hello.Model, hello.Version
 	d.lastSeen = time.Now()
 	d.mu.Unlock()
 	if old != nil {
 		old.Close() // same headset reconnected
 	}
-	log.Printf("connected: %s (%s, app %s) from %s", name, hello.Model, hello.Version, clientIP(r))
+	log.Printf("connected: %s [%s] (%s, app %s) from %s", name, shortID(id), hello.Model, hello.Version, clientIP(r))
 	d.sendWant()
 
 	// Ping/pong is answered by the headset's WebSocket library; we only need data or pings to arrive.
@@ -171,7 +176,7 @@ func handlePush(w http.ResponseWriter, r *http.Request) {
 		d.conn = nil
 		close(d.newFrame) // wake viewers so they notice
 		d.newFrame = make(chan struct{})
-		log.Printf("disconnected: %s", name)
+		log.Printf("disconnected: %s [%s]", name, shortID(id))
 	}
 	d.mu.Unlock()
 	conn.Close()
@@ -206,10 +211,10 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 		list = append(list, d)
 	}
 	devices.mu.Unlock()
-	sort.Slice(list, func(i, j int) bool { return list[i].name < list[j].name })
-
 	type item struct {
+		ID      string          `json:"id"`
 		Name    string          `json:"name"`
+		Label   string          `json:"label"` // name, plus the id tail when names repeat
 		Online  bool            `json:"online"`
 		Model   string          `json:"model"`
 		Version string          `json:"version"`
@@ -217,11 +222,19 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 		Status  json.RawMessage `json:"status,omitempty"`
 	}
 	out := []item{}
+	count := map[string]int{}
 	for _, d := range list {
 		d.mu.Lock()
-		out = append(out, item{d.name, d.conn != nil, d.model, d.version, d.viewers, d.status})
+		out = append(out, item{d.id, d.name, d.name, d.conn != nil, d.model, d.version, d.viewers, d.status})
 		d.mu.Unlock()
+		count[d.name]++
 	}
+	for i := range out {
+		if count[out[i].Name] > 1 && out[i].ID != out[i].Name {
+			out[i].Label = out[i].Name + " · " + shortID(out[i].ID)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(out)
@@ -229,8 +242,8 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 
 // handleStream sends the same MJPEG format as the headset itself, so the page works unchanged.
 func handleStream(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/stream/")
-	d := devices.get(name, false)
+	id := strings.TrimPrefix(r.URL.Path, "/stream/")
+	d := devices.get(id, false)
 	if d == nil {
 		http.Error(w, "unknown headset", http.StatusNotFound)
 		return
@@ -307,6 +320,13 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+func shortID(id string) string {
+	if len(id) > 4 {
+		return id[len(id)-4:]
+	}
+	return id
 }
 
 func clientIP(r *http.Request) string {
