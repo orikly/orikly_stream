@@ -46,6 +46,7 @@ jobs:
           SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STREAM_KEY: ${{ secrets.STREAM_KEY }}
+          RELAY_URL: ${{ secrets.RELAY_URL }}
           VERSION_CODE: ${{ github.run_number }}
           VERSION_NAME: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
         run: |
@@ -55,14 +56,30 @@ jobs:
           bash ./gradlew --no-daemon assembleRelease
           cp app/build/outputs/apk/release/app-release.apk orikly-quest-stream.apk
 
+      # Программа-сервер для ноутбука (Windows). Страница встраивается внутрь .exe.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: orikly-pack/orikly-quest-stream/server/go.mod
+          cache-dependency-path: orikly-pack/orikly-quest-stream/server/go.sum
+
+      - name: Build laptop server
+        run: |
+          cp viewer/index.html server/index.html
+          cd server
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../orikly-server.exe .
+
       - uses: actions/upload-artifact@v4
         with:
           name: orikly-quest-stream
-          path: orikly-pack/orikly-quest-stream/orikly-quest-stream.apk
+          path: |
+            orikly-pack/orikly-quest-stream/orikly-quest-stream.apk
+            orikly-pack/orikly-quest-stream/orikly-server.exe
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
           make_latest: true
-          files: orikly-pack/orikly-quest-stream/orikly-quest-stream.apk
+          files: |
+            orikly-pack/orikly-quest-stream/orikly-quest-stream.apk
+            orikly-pack/orikly-quest-stream/orikly-server.exe
