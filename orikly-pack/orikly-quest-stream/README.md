@@ -54,6 +54,7 @@ https://github.com/<owner>/<repo>/releases/latest/download/orikly-quest-stream.a
    - `http://IP:8080/status?key=КЛЮЧ` — состояние (JSON)
 
 Параметры по умолчанию (в `StreamState.kt`): высота 480, 10 кадров/с, JPEG 60, до 4 зрителей на очки.
+При развороте плитки на весь экран — высокое качество: высота 960, JPEG 80 (`HQ_HEIGHT`, `HQ_JPEG_QUALITY`).
 
 ## 5. Страница на ноутбуке
 
