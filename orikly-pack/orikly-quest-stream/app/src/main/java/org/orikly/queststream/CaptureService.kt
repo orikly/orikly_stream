@@ -46,6 +46,8 @@ class CaptureService : Service() {
     private var rowBitmap: Bitmap? = null
     private var outBitmap: Bitmap? = null
     private var lastFrame: Bitmap? = null
+    private var smallBitmap: Bitmap? = null
+    private val scalePaint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
     private val jpegBuffer = ByteArrayOutputStream(64 * 1024)
     private var lastFrameAt = 0L
     private var fpsWindowStart = 0L
@@ -107,13 +109,12 @@ class CaptureService : Service() {
             display.getRealMetrics(metrics)
             val srcW = metrics.widthPixels
             val srcH = metrics.heightPixels
-            // Масштабирование делает сам VirtualDisplay: сразу рисуем в маленький буфер.
-            val outH = minOf(StreamState.TARGET_HEIGHT, srcH).let { it - it % 2 }
+            // VirtualDisplay сразу масштабирует экран до размера высокого качества;
+            // обычное качество получаем из него уменьшением при сжатии.
+            val outH = minOf(StreamState.HQ_HEIGHT, srcH).let { it - it % 2 }
             val outW = (outH.toLong() * srcW / srcH).toInt().let { it - it % 2 }
             StreamState.sourceWidth = srcW
             StreamState.sourceHeight = srcH
-            StreamState.outWidth = outW
-            StreamState.outHeight = outH
 
             val ir = ImageReader.newInstance(outW, outH, PixelFormat.RGBA_8888, 2)
             reader = ir
@@ -184,8 +185,25 @@ class CaptureService : Service() {
     }
 
     private fun encode(frame: Bitmap, now: Long) {
+        val hq = StreamState.hqClients > 0
+        val out = if (hq || frame.height <= StreamState.TARGET_HEIGHT) frame else {
+            val h = StreamState.TARGET_HEIGHT
+            val w = (h.toLong() * frame.width / frame.height).toInt().let { it - it % 2 }
+            val dst = smallBitmap?.takeIf { it.width == w && it.height == h }
+                ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { smallBitmap = it }
+            android.graphics.Canvas(dst).drawBitmap(
+                frame, null, android.graphics.Rect(0, 0, w, h), scalePaint
+            )
+            dst
+        }
+        StreamState.outWidth = out.width
+        StreamState.outHeight = out.height
         jpegBuffer.reset()
-        frame.compress(Bitmap.CompressFormat.JPEG, StreamState.JPEG_QUALITY, jpegBuffer)
+        out.compress(
+            Bitmap.CompressFormat.JPEG,
+            if (hq) StreamState.HQ_JPEG_QUALITY else StreamState.JPEG_QUALITY,
+            jpegBuffer
+        )
         StreamState.publish(jpegBuffer.toByteArray())
 
         fpsWindowFrames++
@@ -218,6 +236,7 @@ class CaptureService : Service() {
         http?.stop(); http = null
         StreamState.onFrameWanted = null
         lastFrame = null
+        smallBitmap = null
         virtualDisplay?.release(); virtualDisplay = null
         reader?.close(); reader = null
         projection?.let { p -> projection = null; runCatching { p.stop() } }
