@@ -20,6 +20,7 @@ class HttpServer(private val ctx: Context, private val key: String) {
 
     private var server: ServerSocket? = null
     private val streamClients = AtomicInteger(0)
+    private val hqClients = AtomicInteger(0)
 
     fun start() {
         val socket = ServerSocket(StreamState.PORT).apply { reuseAddress = true }
@@ -64,7 +65,7 @@ class HttpServer(private val ctx: Context, private val key: String) {
                     return
                 }
                 when (path) {
-                    "/stream" -> stream(s, out)
+                    "/stream" -> stream(s, out, hq = query["hq"] == "1")
                     "/snapshot.jpg" -> snapshot(out)
                     "/status" -> sendText(out, 200, "application/json", statusJson())
                     else -> sendText(out, 404, "text/plain", "Not Found")
@@ -109,13 +110,14 @@ class HttpServer(private val ctx: Context, private val key: String) {
         return target.substring(0, q) to query
     }
 
-    private fun stream(s: Socket, out: OutputStream) {
+    private fun stream(s: Socket, out: OutputStream, hq: Boolean) {
         if (streamClients.incrementAndGet() > StreamState.MAX_STREAM_CLIENTS) {
             streamClients.decrementAndGet()
             sendText(out, 503, "text/plain", "Too many viewers")
             return
         }
         StreamState.streamClients = streamClients.get()
+        if (hq) StreamState.hqClients = hqClients.incrementAndGet()
         try {
             s.soTimeout = 0
             out.write(
@@ -147,6 +149,7 @@ class HttpServer(private val ctx: Context, private val key: String) {
             }
         } finally {
             StreamState.streamClients = streamClients.decrementAndGet()
+            if (hq) StreamState.hqClients = hqClients.decrementAndGet()
         }
     }
 
