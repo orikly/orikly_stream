@@ -6,6 +6,9 @@ object StreamState {
     const val TARGET_HEIGHT = 480
     const val TARGET_FPS = 10
     const val JPEG_QUALITY = 60
+    /** Высокое качество — для разворота одних очков на весь экран (?hq=1). */
+    const val HQ_HEIGHT = 960
+    const val HQ_JPEG_QUALITY = 80
     const val MAX_STREAM_CLIENTS = 4
 
     enum class Status { IDLE, RUNNING, STOPPED, ERROR }
@@ -18,6 +21,7 @@ object StreamState {
     @Volatile var outHeight = 0
     @Volatile var fps = 0.0
     @Volatile var streamClients = 0
+    @Volatile var hqClients = 0
 
     /** Пока никто не смотрит, JPEG не сжимаем: захват держим, нагрузки почти нет. */
     @Volatile var encodeUntil = 0L
