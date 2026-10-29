@@ -106,7 +106,13 @@ const CONFIG = {
 
 <script>
 const $ = (id) => document.getElementById(id);
+// Served by orikly-server (internet mode): headsets are found by name, no IPs or key needed here.
+// Opened as a file (local mode): headsets by IP from CONFIG / Settings.
+const SERVER_MODE = location.protocol.startsWith("http");
 const base = (d) => `http://${d.ip}:${CONFIG.port}`;
+const streamUrl = (d, hq) => SERVER_MODE
+  ? `/stream/${encodeURIComponent(d.name)}${hq ? "?hq=1" : ""}`
+  : `${base(d)}/stream?${q()}${hq ? "&hq=1" : ""}`;
 const q = () => `key=${encodeURIComponent(CONFIG.key)}`;
 const enc = new TextEncoder();
 const HEADER_END = enc.encode("\r\n\r\n");
@@ -187,7 +193,7 @@ class Tile {
     this.dot = this.el.querySelector(".dot");
     this.stext = this.el.querySelector(".stext");
     this.extra = this.el.querySelector(".extra");
-    this.el.querySelector(".name").textContent = `${dev.name} · ${dev.ip}`;
+    this.el.querySelector(".name").textContent = SERVER_MODE ? dev.name : `${dev.name} · ${dev.ip}`;
     this.btn.onclick = () => (this.active ? this.stop() : this.start($("recordToggle").checked));
     this.el.querySelector(".screen").onclick = () => toggleExpand(this);
     this.blank();
@@ -235,10 +241,11 @@ class Tile {
     const ctrl = new AbortController();
     this.abort = ctrl;
     try {
-      const url = `${base(this.dev)}/stream?${q()}${this.hq ? "&hq=1" : ""}`;
+      const url = streamUrl(this.dev, this.hq);
       const res = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
       if (res.status === 403) throw new Error("Wrong key");
       if (res.status === 503) throw new Error("Too many viewers");
+      if (res.status === 404) throw new Error("Headset offline");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const reader = res.body.getReader();
       let buf = new Uint8Array(0);
@@ -349,7 +356,21 @@ class Tile {
     }
   }
 
+  // Server mode: info comes from /api/devices for all headsets at once.
+  applyInfo(info) {
+    const s = info.status || {};
+    const parts = [];
+    if (s.battery != null) parts.push(`🔋 ${s.battery}%`);
+    if (s.rssi != null) parts.push(`📶 ${s.rssi} dBm`);
+    this.extra.textContent = info.online ? parts.join("  ") : "";
+    if (this.active && Date.now() - this.lastFrameAt < 5000) return;
+    if (!info.online) this.setState("bad", "Offline — headset not connected");
+    else if (s.capturing === false) this.setState("bad", "Capture stopped — tap Iniciar on headset");
+    else if (!this.active) this.setState("ok", "Online · ready");
+  }
+
   async pollStatus() {
+    if (SERVER_MODE) return;
     try {
       const r = await fetch(`${base(this.dev)}/status?${q()}`, { cache: "no-store", signal: AbortSignal.timeout(3000) });
       if (r.status === 403) { this.setState("bad", "Wrong key"); this.extra.textContent = ""; return; }
@@ -423,8 +444,41 @@ function saveSettings() {
 }
 
 // ---------- page ----------
-const tiles = CONFIG.devices.map((d) => new Tile(d));
-tiles.forEach((t) => $("grid").appendChild(t.el));
+const tiles = [];
+function addTile(dev) {
+  const t = new Tile(dev);
+  tiles.push(t);
+  tiles.sort((a, b) => a.dev.name.localeCompare(b.dev.name, undefined, { numeric: true }));
+  tiles.forEach((x) => $("grid").appendChild(x.el));
+  return t;
+}
+if (!SERVER_MODE) CONFIG.devices.forEach(addTile);
+
+// Server mode: headsets appear by themselves; names seen before are kept so their tiles stay in place.
+const KNOWN_KEY = "orikly-known-headsets";
+async function pollServer() {
+  try {
+    const list = await (await fetch("/api/devices", { cache: "no-store" })).json();
+    warn("");
+    let known = [];
+    try { known = JSON.parse(localStorage.getItem(KNOWN_KEY) || "[]"); } catch {}
+    for (const info of list) {
+      let t = tiles.find((x) => x.dev.name === info.name);
+      if (!t) t = addTile({ name: info.name });
+      t.applyInfo(info);
+      if (!known.includes(info.name)) known.push(info.name);
+    }
+    for (const t of tiles) if (!list.some((i) => i.name === t.dev.name)) t.applyInfo({ online: false });
+    try { localStorage.setItem(KNOWN_KEY, JSON.stringify(known)); } catch {}
+    updateSummary();
+  } catch {
+    warn("Server program is not running. Start orikly-server on this laptop.");
+  }
+}
+if (SERVER_MODE) {
+  try { JSON.parse(localStorage.getItem(KNOWN_KEY) || "[]").forEach((name) => addTile({ name })); } catch {}
+  $("openSettings").style.display = "none";
+}
 
 let expanded = null;
 function toggleExpand(tile) {
@@ -457,12 +511,17 @@ window.addEventListener("beforeunload", (e) => {
 });
 
 (async () => {
-  if (!CONFIG.key || CONFIG.key === "CHANGE_ME") warn("Open Settings and enter the access key (same as the STREAM_KEY secret).");
+  if (!SERVER_MODE && (!CONFIG.key || CONFIG.key === "CHANGE_ME")) warn("Open Settings and enter the access key (same as the STREAM_KEY secret).");
   folder = (await kvGet("folder")) || null;
   showFolder();
-  const poll = () => tiles.forEach((t) => t.pollStatus());
-  poll();
-  setInterval(poll, 10000);
+  if (SERVER_MODE) {
+    pollServer();
+    setInterval(pollServer, 3000);
+  } else {
+    const poll = () => tiles.forEach((t) => t.pollStatus());
+    poll();
+    setInterval(poll, 10000);
+  }
 })();
 </script>
 </body>

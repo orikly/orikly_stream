@@ -20,6 +20,9 @@ android {
 
         val streamKey = env("STREAM_KEY") ?: "orikly"
         buildConfigField("String", "STREAM_KEY", "\"$streamKey\"")
+        // Адрес сервера на ноутбуке через интернет, например wss://stream.example.org/push. Пусто — только локальная сеть.
+        val relayUrl = env("RELAY_URL") ?: ""
+        buildConfigField("String", "RELAY_URL", "\"$relayUrl\"")
     }
 
     signingConfigs {
@@ -57,4 +60,9 @@ android {
 
 kotlin {
     jvmToolchain(17)
+}
+
+dependencies {
+    // WebSocket-клиент для отправки картинки на сервер ноутбука через интернет.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

@@ -56,6 +56,11 @@ https://github.com/<owner>/<repo>/releases/latest/download/orikly-quest-stream.a
 Параметры по умолчанию (в `StreamState.kt`): высота 480, 10 кадров/с, JPEG 60, до 4 зрителей на очки.
 При развороте плитки на весь экран — высокое качество: высота 960, JPEG 80 (`HQ_HEIGHT`, `HQ_JPEG_QUALITY`).
 
+## Через интернет (школьный Wi-Fi + ноутбук на iPhone)
+
+См. `ИНСТРУКЦИЯ-ИНТЕРНЕТ.md`. Кратко: секрет `RELAY_URL` = `wss://stream.<домен>/push`, Cloudflare Tunnel на ноутбуке
+(`stream.<домен>` → `http://localhost:8090`), на ноутбуке запустить `orikly-server.exe` (лежит в каждом Release рядом с APK).
+
 ## 5. Страница на ноутбуке
 
 1. Открыть `viewer/index.html` в Chrome (перетащить файл в окно Chrome).

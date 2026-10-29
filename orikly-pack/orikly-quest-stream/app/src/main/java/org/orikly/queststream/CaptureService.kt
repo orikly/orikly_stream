@@ -40,6 +40,7 @@ class CaptureService : Service() {
     private var reader: ImageReader? = null
     private var worker: HandlerThread? = null
     private var http: HttpServer? = null
+    private var relay: RelayClient? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private val wifiLocks = mutableListOf<WifiManager.WifiLock>()
 
@@ -129,6 +130,9 @@ class CaptureService : Service() {
 
             acquireLocks()
             http = HttpServer(this, BuildConfig.STREAM_KEY).also { it.start() }
+            if (BuildConfig.RELAY_URL.isNotBlank()) {
+                relay = RelayClient(this, BuildConfig.RELAY_URL, BuildConfig.STREAM_KEY).also { it.start() }
+            }
 
             StreamState.errorText = null
             StreamState.status = StreamState.Status.RUNNING
@@ -185,7 +189,7 @@ class CaptureService : Service() {
     }
 
     private fun encode(frame: Bitmap, now: Long) {
-        val hq = StreamState.hqClients > 0
+        val hq = StreamState.hqWanted()
         val out = if (hq || frame.height <= StreamState.TARGET_HEIGHT) frame else {
             val h = StreamState.TARGET_HEIGHT
             val w = (h.toLong() * frame.width / frame.height).toInt().let { it - it % 2 }
@@ -234,6 +238,7 @@ class CaptureService : Service() {
 
     private fun releaseAll() {
         http?.stop(); http = null
+        relay?.stop(); relay = null
         StreamState.onFrameWanted = null
         lastFrame = null
         smallBitmap = null

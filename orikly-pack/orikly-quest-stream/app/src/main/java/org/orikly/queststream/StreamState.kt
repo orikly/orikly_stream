@@ -23,11 +23,18 @@ object StreamState {
     @Volatile var streamClients = 0
     @Volatile var hqClients = 0
 
+    /** Сервер ноутбука (через интернет) просит картинку / высокое качество. */
+    @Volatile var relayWant = false
+    @Volatile var relayHq = false
+    @Volatile var relayState = "off"
+
+    fun hqWanted() = hqClients > 0 || relayHq
+
     /** Пока никто не смотрит, JPEG не сжимаем: захват держим, нагрузки почти нет. */
     @Volatile var encodeUntil = 0L
     @Volatile var onFrameWanted: (() -> Unit)? = null
 
-    fun wantsFrames(now: Long) = streamClients > 0 || now < encodeUntil
+    fun wantsFrames(now: Long) = streamClients > 0 || relayWant || now < encodeUntil
 
     /** Просит свежий кадр прямо сейчас (даже если экран статичен и система кадров не шлёт). */
     fun requestFrames(forMs: Long) {

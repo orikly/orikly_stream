@@ -113,6 +113,14 @@ class MainActivity : Activity() {
         nameView.text = DeviceInfo.name(this)
         val ip = DeviceInfo.ip(this)
         addressView.text = if (ip != null) "IP: $ip   Puerto: ${StreamState.PORT}" else "Sin conexión Wi-Fi"
+        if (BuildConfig.RELAY_URL.isNotBlank()) {
+            val relay = when (StreamState.relayState) {
+                "connected" -> if (StreamState.relayWant) "conectado · enviando" else "conectado"
+                "connecting", "reconnecting" -> "conectando…"
+                else -> "inactivo"
+            }
+            addressView.append("\nServidor: $relay")
+        }
         val st = StreamState
         statusView.text = when (st.status) {
             StreamState.Status.IDLE -> "Estado: detenido"
