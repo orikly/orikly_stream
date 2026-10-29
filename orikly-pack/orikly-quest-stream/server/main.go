@@ -10,6 +10,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -240,24 +241,25 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(out)
 }
 
-// handleStream sends the same MJPEG format as the headset itself, so the page works unchanged.
-func handleStream(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/stream/")
-	d := devices.get(id, false)
+// openViewer finds an online headset, or answers 404.
+func openViewer(w http.ResponseWriter, r *http.Request, prefix string) *device {
+	d := devices.get(strings.TrimPrefix(r.URL.Path, prefix), false)
 	if d == nil {
 		http.Error(w, "unknown headset", http.StatusNotFound)
-		return
+		return nil
 	}
 	d.mu.Lock()
 	online := d.conn != nil
 	d.mu.Unlock()
 	if !online {
 		http.Error(w, "headset offline", http.StatusNotFound)
-		return
+		return nil
 	}
-	flusher, _ := w.(http.Flusher)
-	hq := r.URL.Query().Get("hq") == "1"
+	return d
+}
 
+// watch asks the headset for frames while this viewer is open and hands every new frame to send.
+func watch(ctx context.Context, d *device, hq bool, send func([]byte) error) {
 	d.mu.Lock()
 	d.viewers++
 	if hq {
@@ -276,15 +278,6 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		d.sendWant()
 	}()
 
-	const boundary = "oriklyframe"
-	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary="+boundary)
-	w.Header().Set("Cache-Control", "no-cache, no-store")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "--%s\r\n", boundary)
-	if flusher != nil {
-		flusher.Flush()
-	}
-
 	sentAny := false
 	for {
 		d.mu.Lock()
@@ -294,7 +287,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		select {
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
 		case <-wait:
 		case <-time.After(time.Second): // static screen: repeat the last frame as keep-alive
@@ -307,19 +300,74 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		lastSeq, sentAny = seq, true
-		if _, err := fmt.Fprintf(w, "Content-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(frame)); err != nil {
+		if send(frame) != nil {
 			return
+		}
+	}
+}
+
+// handleView: one WebSocket per tile. Chrome allows only 6 HTTP streams to one address,
+// so with 7+ headsets MJPEG over HTTP stalls; WebSockets do not have that limit.
+func handleView(w http.ResponseWriter, r *http.Request) {
+	if o := r.Header.Get("Origin"); o != "" && !strings.HasSuffix(o, "://"+r.Host) {
+		http.Error(w, "forbidden", http.StatusForbidden) // only our own page
+		return
+	}
+	d := openViewer(w, r, "/view/")
+	if d == nil {
+		return
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	go func() { // notice when the page closes the socket
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				cancel()
+				return
+			}
+		}
+	}()
+	watch(ctx, d, r.URL.Query().Get("hq") == "1", func(frame []byte) error {
+		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		return conn.WriteMessage(websocket.BinaryMessage, frame)
+	})
+}
+
+// handleStream sends the same MJPEG format as the headset itself (handy to open one headset in a tab).
+func handleStream(w http.ResponseWriter, r *http.Request) {
+	d := openViewer(w, r, "/stream/")
+	if d == nil {
+		return
+	}
+	flusher, _ := w.(http.Flusher)
+	const boundary = "oriklyframe"
+	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary="+boundary)
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "--%s\r\n", boundary)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	watch(r.Context(), d, r.URL.Query().Get("hq") == "1", func(frame []byte) error {
+		if _, err := fmt.Fprintf(w, "Content-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(frame)); err != nil {
+			return err
 		}
 		if _, err := w.Write(frame); err != nil {
-			return
+			return err
 		}
 		if _, err := fmt.Fprintf(w, "\r\n--%s\r\n", boundary); err != nil {
-			return
+			return err
 		}
 		if flusher != nil {
 			flusher.Flush()
 		}
-	}
+		return nil
+	})
 }
 
 func shortID(id string) string {
@@ -383,6 +431,7 @@ func main() {
 	mux.HandleFunc("/push", handlePush)
 	mux.HandleFunc("/api/devices", localOnly(handleDevices))
 	mux.HandleFunc("/stream/", localOnly(handleStream))
+	mux.HandleFunc("/view/", localOnly(handleView))
 	mux.HandleFunc("/", localOnly(handleIndex))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)

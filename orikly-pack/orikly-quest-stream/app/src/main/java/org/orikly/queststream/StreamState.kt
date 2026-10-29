@@ -5,10 +5,8 @@ object StreamState {
     const val PORT = 8080
     const val TARGET_HEIGHT = 480
     const val TARGET_FPS = 10
-    const val JPEG_QUALITY = 60
-    /** Высокое качество — для разворота одних очков на весь экран (?hq=1). */
+    /** Высокое качество — для разворота одних очков на весь экран (?hq=1). Качество JPEG — в лестницах ниже. */
     const val HQ_HEIGHT = 960
-    const val HQ_JPEG_QUALITY = 80
     const val MAX_STREAM_CLIENTS = 4
 
     enum class Status { IDLE, RUNNING, STOPPED, ERROR }
@@ -29,6 +27,16 @@ object StreamState {
     @Volatile var relayState = "off"
 
     fun hqWanted() = hqClients > 0 || relayHq
+
+    /**
+     * Ступени качества при передаче через интернет: частота кадров важнее качества.
+     * Если канал не успевает, RelayClient сдвигает ступень вниз (хуже, но 10 кадров/с), потом обратно.
+     * Пары: высота кадра, качество JPEG.
+     */
+    val NORMAL_LADDER = listOf(480 to 60, 480 to 50, 480 to 40, 400 to 40, 360 to 35, 300 to 30)
+    val HQ_LADDER = listOf(960 to 80, 840 to 70, 720 to 65, 600 to 60, 480 to 55, 400 to 45)
+    @Volatile var relayLevel = 0
+    @Volatile var relaySentFps = 0.0
 
     /** Пока никто не смотрит, JPEG не сжимаем: захват держим, нагрузки почти нет. */
     @Volatile var encodeUntil = 0L

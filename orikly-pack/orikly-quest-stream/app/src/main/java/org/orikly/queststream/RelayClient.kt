@@ -113,6 +113,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             socket = null
             StreamState.relayWant = false
             StreamState.relayHq = false
+            StreamState.relayLevel = 0
             if (!running) break
             StreamState.relayState = "reconnecting"
             Thread.sleep(backoff)
@@ -124,8 +125,18 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
     private fun pump(ws: WebSocket, closed: CountDownLatch) {
         var lastSeq = StreamState.latest().first
         var lastStatus = 0L
+        var sent = 0
+        var dropped = 0
+        var windowStart = SystemClock.elapsedRealtime()
+        var calmSince = windowStart
+        StreamState.relayLevel = 0
         while (running && closed.count > 0) {
             val now = SystemClock.elapsedRealtime()
+            if (now - windowStart >= 2000) {
+                adapt(sent, dropped, now, calmSince).let { if (it) calmSince = now }
+                StreamState.relaySentFps = sent * 1000.0 / (now - windowStart)
+                sent = 0; dropped = 0; windowStart = now
+            }
             if (now - lastStatus >= 10_000) {
                 ws.send(statusJson())
                 lastStatus = now
@@ -137,9 +148,34 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             val (seq, jpeg) = StreamState.awaitNewer(lastSeq, 500)
             if (jpeg == null || seq == lastSeq) continue
             lastSeq = seq
-            // Если интернет не успевает, кадр выбрасываем: лучше пропуск, чем растущая задержка.
-            if (ws.queueSize() < MAX_QUEUE_BYTES) ws.send(jpeg.toByteString())
+            // Не копим очередь: если прошлый кадр ещё не ушёл, этот выбрасываем (иначе растёт задержка).
+            if (ws.queueSize() > maxOf(MIN_BACKLOG_BYTES, jpeg.size.toLong())) {
+                dropped++
+            } else {
+                ws.send(jpeg.toByteString())
+                sent++
+            }
         }
+    }
+
+    /**
+     * Держим 10 кадров/с: если за 2 с выброшено >10% кадров — ступень качества ниже;
+     * если 6 с без потерь — ступень выше. Возвращает true, если ступень сменилась.
+     */
+    private fun adapt(sent: Int, dropped: Int, now: Long, calmSince: Long): Boolean {
+        val total = sent + dropped
+        val max = StreamState.NORMAL_LADDER.size - 1
+        val level = StreamState.relayLevel
+        if (total > 0 && dropped * 10 > total && level < max) {
+            StreamState.relayLevel = level + 1
+            Log.i(TAG, "network slow: quality level ${level + 1}")
+            return true
+        }
+        if (dropped == 0 && now - calmSince >= 6000 && level > 0) {
+            StreamState.relayLevel = level - 1
+            return true
+        }
+        return dropped > 0
     }
 
     private fun helloJson() = JSONObject()
@@ -156,6 +192,8 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             .put("type", "status")
             .put("capturing", st.status == StreamState.Status.RUNNING)
             .put("fps", st.fps)
+            .put("sentFps", st.relaySentFps)
+            .put("level", st.relayLevel)
             .put("output", "${st.outWidth}x${st.outHeight}")
             .put("source", "${st.sourceWidth}x${st.sourceHeight}")
             .put("battery", DeviceInfo.battery(ctx) ?: JSONObject.NULL)
@@ -166,6 +204,6 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
 
     companion object {
         private const val TAG = "OriklyRelay"
-        private const val MAX_QUEUE_BYTES = 512L * 1024
+        private const val MIN_BACKLOG_BYTES = 32L * 1024
     }
 }

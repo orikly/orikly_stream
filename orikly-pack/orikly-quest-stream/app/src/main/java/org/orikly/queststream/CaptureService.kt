@@ -50,7 +50,7 @@ class CaptureService : Service() {
     private var smallBitmap: Bitmap? = null
     private val scalePaint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
     private val jpegBuffer = ByteArrayOutputStream(64 * 1024)
-    private var lastFrameAt = 0L
+    private var nextFrameAt = 0L
     private var fpsWindowStart = 0L
     private var fpsWindowFrames = 0
 
@@ -154,8 +154,11 @@ class CaptureService : Service() {
             val wanted = StreamState.wantsFrames(now)
             // Без зрителей только обновляем кадр в памяти раз в секунду (дёшево), без JPEG.
             val interval = if (wanted) 1000L / StreamState.TARGET_FPS else 1000L
-            if (now - lastFrameAt < interval) return
-            lastFrameAt = now
+            // Расписание с шагом ровно interval: экран даёт кадры каждые ~14 мс (72 Гц),
+            // и простое «прошло ≥100 мс» давало ~9 кадров/с вместо 10.
+            if (nextFrameAt - now > interval) nextFrameAt = now // зритель только что появился: не ждать «холостую» секунду
+            if (now < nextFrameAt) return
+            nextFrameAt = if (now - nextFrameAt > interval) now + interval else nextFrameAt + interval
 
             val plane = image.planes[0]
             val w = image.width
@@ -190,8 +193,10 @@ class CaptureService : Service() {
 
     private fun encode(frame: Bitmap, now: Long) {
         val hq = StreamState.hqWanted()
-        val out = if (hq || frame.height <= StreamState.TARGET_HEIGHT) frame else {
-            val h = StreamState.TARGET_HEIGHT
+        val ladder = if (hq) StreamState.HQ_LADDER else StreamState.NORMAL_LADDER
+        val (targetH, quality) = ladder[StreamState.relayLevel.coerceIn(0, ladder.size - 1)]
+        val out = if (frame.height <= targetH) frame else {
+            val h = targetH
             val w = (h.toLong() * frame.width / frame.height).toInt().let { it - it % 2 }
             val dst = smallBitmap?.takeIf { it.width == w && it.height == h }
                 ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { smallBitmap = it }
@@ -203,11 +208,7 @@ class CaptureService : Service() {
         StreamState.outWidth = out.width
         StreamState.outHeight = out.height
         jpegBuffer.reset()
-        out.compress(
-            Bitmap.CompressFormat.JPEG,
-            if (hq) StreamState.HQ_JPEG_QUALITY else StreamState.JPEG_QUALITY,
-            jpegBuffer
-        )
+        out.compress(Bitmap.CompressFormat.JPEG, quality, jpegBuffer)
         StreamState.publish(jpegBuffer.toByteArray())
 
         fpsWindowFrames++

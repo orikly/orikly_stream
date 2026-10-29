@@ -241,6 +241,7 @@ class Tile {
 
   async stop() {
     this.active = false;
+    this.fps = null; this.fpsStart = 0; this.fpsFrames = 0;
     this.wantRecord = false;
     this.abort?.abort();
     this.abort = null;
@@ -254,6 +255,7 @@ class Tile {
   // MJPEG via fetch: we parse frames ourselves, so the canvas stays recordable.
   async connect() {
     if (!this.active) return;
+    if (SERVER_MODE) return this.connectWs();
     const ctrl = new AbortController();
     this.abort = ctrl;
     try {
@@ -286,6 +288,40 @@ class Tile {
     if (this.active && this.abort === ctrl) setTimeout(() => this.connect(), 3000);
   }
 
+  // Server mode: one WebSocket per tile (Chrome allows only 6 HTTP streams to one address).
+  connectWs() {
+    const ctrl = new AbortController();
+    this.abort = ctrl;
+    const url = `ws://${location.host}/view/${encodeURIComponent(this.dev.id)}${this.hq ? "?hq=1" : ""}`;
+    const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+    ctrl.signal.addEventListener("abort", () => ws.close());
+    this.lastFrameAt = Date.now();
+    this.watchdog(ctrl);
+    ws.onmessage = (e) => {
+      if (typeof e.data === "string") return;
+      // Draw only the newest frame; if decoding falls behind, skip old ones instead of lagging.
+      this.pending = new Uint8Array(e.data);
+      if (!this.drawing) this.drawPending();
+    };
+    ws.onclose = () => {
+      if (ctrl.signal.aborted && (!this.active || this.abort !== ctrl)) return; // stopped or switched by us
+      this.setState("bad", "No connection");
+      this.overlay.textContent = "No connection — retrying…";
+      if (this.active && this.abort === ctrl) setTimeout(() => this.connect(), 3000);
+    };
+  }
+
+  async drawPending() {
+    this.drawing = true;
+    while (this.pending) {
+      const jpeg = this.pending;
+      this.pending = null;
+      await this.draw(jpeg);
+    }
+    this.drawing = false;
+  }
+
   watchdog(ctrl) {
     const t = setInterval(() => {
       if (ctrl.signal.aborted || this.abort !== ctrl) return clearInterval(t);
@@ -313,7 +349,15 @@ class Tile {
       if (this.recCanvas) this.recCtx.drawImage(bmp, 0, 0, this.recCanvas.width, this.recCanvas.height);
       bmp.close();
       this.overlay.textContent = "";
-      this.setState("ok", "Streaming");
+      // Real frame rate as seen on this laptop.
+      const now = performance.now();
+      this.fpsFrames = (this.fpsFrames || 0) + 1;
+      if (!this.fpsStart) this.fpsStart = now;
+      if (now - this.fpsStart >= 2000) {
+        this.fps = Math.round((this.fpsFrames * 1000) / (now - this.fpsStart));
+        this.fpsFrames = 0; this.fpsStart = now;
+      }
+      this.setState("ok", this.fps != null ? `Streaming · ${this.fps} fps` : "Streaming");
       if (this.wantRecord && !this.recorder && !this.startingRec) {
         this.startingRec = true;
         this.startRecording().finally(() => { this.startingRec = false; updateSummary(); });
@@ -379,6 +423,7 @@ class Tile {
     const parts = [];
     if (s.battery != null) parts.push(`🔋 ${s.battery}%`);
     if (s.rssi != null) parts.push(`📶 ${s.rssi} dBm`);
+    if (s.level > 0) parts.push(`⚠ quality −${s.level}`); // headset lowered quality to keep 10 fps
     this.extra.textContent = info.online ? parts.join("  ") : "";
     if (this.active && Date.now() - this.lastFrameAt < 5000) return;
     if (!info.online) this.setState("bad", "Offline — headset not connected");
