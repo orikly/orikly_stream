@@ -12,8 +12,10 @@ import okhttp3.WebSocketListener
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
@@ -34,6 +36,13 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
 
     @Volatile private var running = false
     @Volatile private var socket: WebSocket? = null
+
+    // Подтверждения от ноутбука: в пути не больше MAX_IN_FLIGHT кадров. Без этого при узком интернете
+    // ноутбука кадры копились в Cloudflare и сетевых буферах, и задержка росла до 5–7 с.
+    @Volatile private var acksEnabled = false
+    private val inFlight = AtomicInteger(0)
+    private val sentTimes = ConcurrentLinkedQueue<Long>()
+    @Volatile private var lastAckAt = 0L
     private var loop: Thread? = null
 
     fun start() {
@@ -74,7 +83,16 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     runCatching {
                         val msg = JSONObject(text)
-                        if (msg.optString("type") == "want") {
+                        if (msg.optString("type") == "ack") {
+                            val now = SystemClock.elapsedRealtime()
+                            lastAckAt = now
+                            if (inFlight.decrementAndGet() < 0) inFlight.set(0)
+                            sentTimes.poll()?.let { sentAt ->
+                                val rtt = now - sentAt
+                                StreamState.relayRttMs = (StreamState.relayRttMs * 3 + rtt) / 4
+                            }
+                        } else if (msg.optString("type") == "want") {
+                            acksEnabled = msg.optBoolean("acks") // сервер старее v0.3.3 подтверждений не шлёт
                             val on = msg.optBoolean("on")
                             StreamState.relayHq = msg.optBoolean("hq")
                             val wasOn = StreamState.relayWant
@@ -99,6 +117,10 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
                 }
             })
             socket = ws
+            acksEnabled = false
+            inFlight.set(0)
+            sentTimes.clear()
+            StreamState.relayRttMs = 0
             opened.await(20, TimeUnit.SECONDS)
 
             if (ok && closed.count > 0) {
@@ -129,6 +151,9 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
         var dropped = 0
         var windowStart = SystemClock.elapsedRealtime()
         var calmSince = windowStart
+        var waitingSeq = -1L
+        var lastSentAt = windowStart
+        lastAckAt = windowStart
         StreamState.relayLevel = 0
         while (running && closed.count > 0) {
             val now = SystemClock.elapsedRealtime()
@@ -137,7 +162,8 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
                 StreamState.relaySentFps = sent * 1000.0 / (now - windowStart)
                 sent = 0; dropped = 0; windowStart = now
             }
-            if (now - lastStatus >= 10_000) {
+            // Пока идёт картинка — статус чаще, чтобы на ноутбуке было видно задержку канала.
+            if (now - lastStatus >= if (StreamState.relayWant) 2000 else 10_000) {
                 ws.send(statusJson())
                 lastStatus = now
             }
@@ -147,12 +173,27 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             }
             val (seq, jpeg) = StreamState.awaitNewer(lastSeq, 500)
             if (jpeg == null || seq == lastSeq) continue
+            if (acksEnabled && inFlight.get() >= MAX_IN_FLIGHT) {
+                if (now - lastAckAt > ACK_STUCK_MS && now - lastSentAt > ACK_STUCK_MS) {
+                    inFlight.set(0); sentTimes.clear() // подтверждения потерялись — не зависаем навсегда
+                } else {
+                    // Окно занято: этот кадр не шлём сейчас, а отправим самый свежий, как только придёт подтверждение.
+                    if (seq != waitingSeq) { dropped++; waitingSeq = seq }
+                    Thread.sleep(5)
+                    continue
+                }
+            }
             lastSeq = seq
-            // Не копим очередь: если прошлый кадр ещё не ушёл, этот выбрасываем (иначе растёт задержка).
+            // Не копим очередь и у себя: если прошлый кадр ещё не ушёл из очков, этот выбрасываем.
             if (ws.queueSize() > maxOf(MIN_BACKLOG_BYTES, jpeg.size.toLong())) {
                 dropped++
             } else {
+                if (acksEnabled) {
+                    inFlight.incrementAndGet()
+                    sentTimes.add(now)
+                }
                 ws.send(jpeg.toByteString())
+                lastSentAt = now
                 sent++
             }
         }
@@ -194,6 +235,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             .put("fps", st.fps)
             .put("sentFps", st.relaySentFps)
             .put("level", st.relayLevel)
+            .put("rtt", st.relayRttMs)
             .put("output", "${st.outWidth}x${st.outHeight}")
             .put("source", "${st.sourceWidth}x${st.sourceHeight}")
             .put("battery", DeviceInfo.battery(ctx) ?: JSONObject.NULL)
@@ -205,5 +247,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
     companion object {
         private const val TAG = "OriklyRelay"
         private const val MIN_BACKLOG_BYTES = 32L * 1024
+        private const val MAX_IN_FLIGHT = 3 // ~10 кадров/с даже при отклике канала до ~300 мс
+        private const val ACK_STUCK_MS = 5000L
     }
 }

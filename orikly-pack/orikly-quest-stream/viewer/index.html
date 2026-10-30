@@ -424,6 +424,7 @@ class Tile {
     if (s.battery != null) parts.push(`🔋 ${s.battery}%`);
     if (s.rssi != null) parts.push(`📶 ${s.rssi} dBm`);
     if (s.level > 0) parts.push(`⚠ quality −${s.level}`); // headset lowered quality to keep 10 fps
+    if (this.active && s.rtt > 0) parts.push(`⏱ ${s.rtt} ms`); // headset → laptop round trip
     this.extra.textContent = info.online ? parts.join("  ") : "";
     if (this.active && Date.now() - this.lastFrameAt < 5000) return;
     if (!info.online) this.setState("bad", "Offline — headset not connected");

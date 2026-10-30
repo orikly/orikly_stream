@@ -37,6 +37,8 @@ object StreamState {
     val HQ_LADDER = listOf(960 to 80, 840 to 70, 720 to 65, 600 to 60, 480 to 55, 400 to 45)
     @Volatile var relayLevel = 0
     @Volatile var relaySentFps = 0.0
+    /** Время «кадр ушёл → ноутбук подтвердил», мс. Растёт — значит, канал на пределе. */
+    @Volatile var relayRttMs = 0L
 
     /** Пока никто не смотрит, JPEG не сжимаем: захват держим, нагрузки почти нет. */
     @Volatile var encodeUntil = 0L

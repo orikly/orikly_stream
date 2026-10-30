@@ -91,7 +91,17 @@ func (d *device) sendWant() {
 	d.writeMu.Lock()
 	defer d.writeMu.Unlock()
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	conn.WriteJSON(map[string]any{"type": "want", "on": on, "hq": hq})
+	// acks: this server confirms every frame, so the headset keeps only a few frames in flight.
+	conn.WriteJSON(map[string]any{"type": "want", "on": on, "hq": hq, "acks": true})
+}
+
+// ack confirms a received frame. Without this, frames piled up in Cloudflare and network
+// buffers whenever the laptop's internet was slower than the headsets, and delay grew to 5-7 s.
+func (d *device) ack(conn *websocket.Conn) {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"ack"}`))
 }
 
 // ---------- headsets ----------
@@ -163,6 +173,9 @@ func handlePush(w http.ResponseWriter, r *http.Request) {
 			d.seq++
 			close(d.newFrame)
 			d.newFrame = make(chan struct{})
+			d.mu.Unlock()
+			d.ack(conn)
+			continue
 		} else {
 			var m struct{ Type string }
 			if json.Unmarshal(msg, &m) == nil && m.Type == "status" {
