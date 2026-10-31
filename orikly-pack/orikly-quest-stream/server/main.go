@@ -1,4 +1,4 @@
-// orikly-server: runs on the observer laptop (Windows).
+// orikly-server: runs on the observer laptop (Windows or macOS).
 //
 // Headsets connect over the internet (through Cloudflare Tunnel) to /push with a WebSocket,
 // and send JPEG frames only while someone is watching. The laptop's Chrome opens
@@ -431,8 +431,14 @@ func fail(msg string) {
 }
 
 func openBrowser(url string) {
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	case "darwin":
+		// Chrome is needed for recording to a folder; fall back to the default browser.
+		if exec.Command("open", "-a", "Google Chrome", url).Run() != nil {
+			exec.Command("open", url).Start()
+		}
 	}
 }
 
