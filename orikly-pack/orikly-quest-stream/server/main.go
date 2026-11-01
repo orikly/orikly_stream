@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -452,6 +453,11 @@ func main() {
 	mux.HandleFunc("/stream/", localOnly(handleStream))
 	mux.HandleFunc("/view/", localOnly(handleView))
 	mux.HandleFunc("/", localOnly(handleIndex))
+
+	if runtime.GOOS == "darwin" {
+		// Keep the Mac awake while the server runs (it stops when this program exits).
+		exec.Command("caffeinate", "-di", "-w", strconv.Itoa(os.Getpid())).Start()
+	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	url := fmt.Sprintf("http://localhost:%d", cfg.Port)

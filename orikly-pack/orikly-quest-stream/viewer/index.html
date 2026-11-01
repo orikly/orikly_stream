@@ -160,7 +160,8 @@ async function ensureFolderPermission() {
 function warn(text) { const w = $("warn"); w.textContent = text; w.style.display = text ? "block" : "none"; }
 
 function pickMime() {
-  const types = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+  // avc3 keeps codec settings inside the stream (Chrome warns that avc1 files can break otherwise).
+  const types = ["video/mp4;codecs=avc3", "video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
   return types.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
 }
 const stamp = () => {
