@@ -14,6 +14,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -53,6 +54,7 @@ type device struct {
 	version   string
 	status    json.RawMessage
 	lastSeen  time.Time
+	net       netCounters
 }
 
 type hub struct {
@@ -114,7 +116,8 @@ func handlePush(w http.ResponseWriter, r *http.Request) {
 	}
 	if key != cfg.Key {
 		if key != "" {
-			log.Printf("rejected a headset with a wrong key from %s (check STREAM_KEY and orikly-server.json)", clientIP(r))
+			log.Printf("rejected a headset with a wrong key from %s (check STREAM_KEY and orikly-server.json): %s; client %q",
+				clientIP(r), keyDiff(key, cfg.Key), r.Header.Get("User-Agent"))
 		}
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -172,6 +175,7 @@ func handlePush(w http.ResponseWriter, r *http.Request) {
 		if typ == websocket.BinaryMessage {
 			d.frame = msg
 			d.seq++
+			d.onFrame(len(msg))
 			close(d.newFrame)
 			d.newFrame = make(chan struct{})
 			d.mu.Unlock()
@@ -275,6 +279,9 @@ func openViewer(w http.ResponseWriter, r *http.Request, prefix string) *device {
 // watch asks the headset for frames while this viewer is open and hands every new frame to send.
 func watch(ctx context.Context, d *device, hq bool, send func([]byte) error) {
 	d.mu.Lock()
+	if d.viewers == 0 {
+		d.onWatchStart()
+	}
 	d.viewers++
 	if hq {
 		d.hqViewers++
@@ -384,6 +391,36 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// keyDiff explains how two keys differ without printing them: lengths, first differing position,
+// and what kind of character is there (letter / digit / non-Latin...).
+func keyDiff(got, want string) string {
+	g, w := []rune(got), []rune(want)
+	pos := 0
+	for pos < len(g) && pos < len(w) && g[pos] == w[pos] {
+		pos++
+	}
+	kind := func(r []rune) string {
+		if pos >= len(r) {
+			return "end of key"
+		}
+		c := r[pos]
+		switch {
+		case c >= 'a' && c <= 'z':
+			return "Latin lowercase letter"
+		case c >= 'A' && c <= 'Z':
+			return "Latin uppercase letter"
+		case c >= '0' && c <= '9':
+			return "digit"
+		case c < 128:
+			return fmt.Sprintf("symbol %q", c)
+		default:
+			return fmt.Sprintf("NON-Latin character U+%04X", c)
+		}
+	}
+	return fmt.Sprintf("headset key %d chars, this laptop's key %d chars, first difference at character %d (headset: %s, laptop: %s)",
+		len(g), len(w), pos+1, kind(g), kind(w))
+}
+
 func shortID(id string) string {
 	if len(id) > 4 {
 		return id[len(id)-4:]
@@ -422,6 +459,7 @@ func loadConfig() {
 		}
 		fmt.Println("Saved to", path)
 	}
+	fmt.Printf("Key from %s: %d characters.\n", path, len([]rune(cfg.Key)))
 }
 
 func fail(msg string) {
@@ -447,7 +485,12 @@ func main() {
 	log.SetFlags(log.Ltime)
 	disableQuickEdit()
 	loadConfig()
-	log.SetOutput(newAsyncLog(os.Stdout)) // after loadConfig: the key prompt must be shown synchronously
+	var out io.Writer = os.Stdout
+	if f := logFile(); f != nil {
+		out = io.MultiWriter(os.Stdout, f)
+	}
+	log.SetOutput(newAsyncLog(out)) // after loadConfig: the key prompt must be shown synchronously
+	go monitorNetwork()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/push", handlePush)
