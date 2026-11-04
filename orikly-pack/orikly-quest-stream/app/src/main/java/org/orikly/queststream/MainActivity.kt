@@ -20,6 +20,7 @@ class MainActivity : Activity() {
     private lateinit var nameView: TextView
     private lateinit var addressView: TextView
     private lateinit var statusView: TextView
+    private lateinit var diagView: TextView
     private lateinit var button: Button
     private val ui = Handler(Looper.getMainLooper())
     private val refresher = object : Runnable {
@@ -41,6 +42,7 @@ class MainActivity : Activity() {
         nameView = text(26f, bold = true)
         addressView = text(20f)
         statusView = text(20f)
+        diagView = text(16f).apply { alpha = 0.7f }
         button = Button(this).apply {
             textSize = 22f
             setOnClickListener { onButton() }
@@ -62,6 +64,7 @@ class MainActivity : Activity() {
             addView(nameView)
             addView(addressView)
             addView(statusView)
+            addView(diagView)
             addView(button)
             addView(hint)
             addView(keyView)
@@ -129,6 +132,12 @@ class MainActivity : Activity() {
             StreamState.Status.STOPPED -> "Estado: detenido por el sistema. Pulsa «Iniciar» de nuevo."
             StreamState.Status.ERROR -> "Estado: error — ${st.errorText ?: "desconocido"}"
         }
+        // Диагностика: «sistema» — кадры/с от самой системы, «enviados» — кадры/с, ушедшие на ноутбук.
+        diagView.text = if (st.status == StreamState.Status.RUNNING)
+            "Diagnóstico: sistema %.1f fps · enviados %.1f fps · captura %dx%d · pantalla %dx%d %d Hz"
+                .format(st.systemFps, st.relaySentFps, st.captureWidth, st.captureHeight,
+                    st.sourceWidth, st.sourceHeight, Math.round(st.displayHz))
+        else ""
         button.text = if (st.status == StreamState.Status.RUNNING) "Detener transmisión" else "Iniciar transmisión"
     }
 

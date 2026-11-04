@@ -18,6 +18,16 @@ object StreamState {
     @Volatile var outWidth = 0
     @Volatile var outHeight = 0
     @Volatile var fps = 0.0
+
+    /**
+     * Диагностика: сколько кадров в секунду отдаёт сама система (вызовы onImage), до нашего отбора 10 кадров/с.
+     * Если здесь ~1 — кадров не даёт сама система Quest; если ~10+, а до ноутбука доходит меньше — теряются в пути.
+     */
+    @Volatile var systemFrames = 0L
+    @Volatile var systemFps = 0.0
+    @Volatile var captureWidth = 0
+    @Volatile var captureHeight = 0
+    @Volatile var displayHz = 0f
     @Volatile var streamClients = 0
     @Volatile var hqClients = 0
 

@@ -238,6 +238,11 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             .put("rtt", st.relayRttMs)
             .put("output", "${st.outWidth}x${st.outHeight}")
             .put("source", "${st.sourceWidth}x${st.sourceHeight}")
+            // диагностика: частота кадров от системы, размер захвата, частота экрана, версия Horizon OS
+            .put("sysFps", Math.round(st.systemFps * 10) / 10.0)
+            .put("capture", "${st.captureWidth}x${st.captureHeight}")
+            .put("hz", Math.round(st.displayHz))
+            .put("os", Build.DISPLAY)
             .put("battery", DeviceInfo.battery(ctx) ?: JSONObject.NULL)
             .put("rssi", DeviceInfo.rssi(ctx) ?: JSONObject.NULL)
             .put("ip", DeviceInfo.ip(ctx) ?: JSONObject.NULL)

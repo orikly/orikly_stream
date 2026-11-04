@@ -445,7 +445,9 @@ func openBrowser(url string) {
 
 func main() {
 	log.SetFlags(log.Ltime)
+	disableQuickEdit()
 	loadConfig()
+	log.SetOutput(newAsyncLog(os.Stdout)) // after loadConfig: the key prompt must be shown synchronously
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/push", handlePush)

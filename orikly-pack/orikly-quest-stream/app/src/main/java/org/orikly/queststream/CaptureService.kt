@@ -116,6 +116,10 @@ class CaptureService : Service() {
             val outW = (outH.toLong() * srcW / srcH).toInt().let { it - it % 2 }
             StreamState.sourceWidth = srcW
             StreamState.sourceHeight = srcH
+            StreamState.captureWidth = outW
+            StreamState.captureHeight = outH
+            StreamState.displayHz = display.refreshRate
+            startSystemFpsMeter(handler)
 
             val ir = ImageReader.newInstance(outW, outH, PixelFormat.RGBA_8888, 2)
             reader = ir
@@ -143,7 +147,26 @@ class CaptureService : Service() {
         }
     }
 
+    /** Раз в 2 с пересчитывает частоту кадров системы. Работает и когда кадров нет совсем (тогда 0). */
+    private fun startSystemFpsMeter(handler: Handler) {
+        StreamState.systemFrames = 0
+        StreamState.systemFps = 0.0
+        var lastCount = 0L
+        var lastAt = SystemClock.elapsedRealtime()
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                if (projection == null) return
+                val now = SystemClock.elapsedRealtime()
+                val count = StreamState.systemFrames
+                StreamState.systemFps = (count - lastCount) * 1000.0 / maxOf(1L, now - lastAt)
+                lastCount = count; lastAt = now
+                handler.postDelayed(this, 2000)
+            }
+        }, 2000)
+    }
+
     private fun onImage(ir: ImageReader) {
+        StreamState.systemFrames++ // каждый вызов = система дала новый кадр экрана
         val image = try {
             ir.acquireLatestImage()
         } catch (e: IllegalStateException) {
@@ -249,6 +272,7 @@ class CaptureService : Service() {
         worker?.quitSafely(); worker = null
         StreamState.clearFrame()
         StreamState.fps = 0.0
+        StreamState.systemFps = 0.0
         releaseLocks()
     }
 

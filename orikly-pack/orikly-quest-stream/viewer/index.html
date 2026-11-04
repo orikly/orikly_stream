@@ -57,7 +57,8 @@ const CONFIG = {
   .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
           display: flex; flex-direction: column; }
   .screen { position: relative; aspect-ratio: 1 / 1; background: var(--tile); cursor: zoom-in; }
-  .screen canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+  /* absolute: in the expanded view the canvas must not stretch the flex box (top and bottom were cut off) */
+  .screen canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
   .screen .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
                      color: #bbb; font-size: 13px; text-align: center; padding: 12px; pointer-events: none; }
   .rec { position: absolute; top: 8px; left: 8px; background: var(--rec); color: #fff; font-size: 11px;
@@ -71,7 +72,8 @@ const CONFIG = {
   .info { font-size: 12px; }
   /* expanded view */
   .tile.expanded { position: fixed; inset: 0; z-index: 10; border-radius: 0; border: 0; }
-  .tile.expanded .screen { flex: 1; aspect-ratio: auto; cursor: zoom-out; }
+  .tile.expanded .screen { flex: 1; min-height: 0; aspect-ratio: auto; cursor: zoom-out; }
+  .diag { font-size: 11px; }
   dialog { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--text);
            padding: 16px; width: min(560px, calc(100vw - 32px)); }
   dialog::backdrop { background: rgba(0,0,0,.5); }
@@ -186,6 +188,7 @@ class Tile {
         <div class="row"><span class="name"></span><button class="toggle primary">Start</button></div>
         <div class="row info"><span class="state"><span class="dot"></span><span class="stext">Checking…</span></span>
           <span class="muted extra"></span></div>
+        <div class="muted diag"></div>
       </div>`;
     this.canvas = this.el.querySelector("canvas");
     this.ctx = this.canvas.getContext("2d");
@@ -194,6 +197,7 @@ class Tile {
     this.dot = this.el.querySelector(".dot");
     this.stext = this.el.querySelector(".stext");
     this.extra = this.el.querySelector(".extra");
+    this.diag = this.el.querySelector(".diag");
     this.nameEl = this.el.querySelector(".name");
     this.showTitle();
     if (SERVER_MODE) {
@@ -427,6 +431,16 @@ class Tile {
     if (s.level > 0) parts.push(`⚠ quality −${s.level}`); // headset lowered quality to keep 10 fps
     if (this.active && s.rtt > 0) parts.push(`⏱ ${s.rtt} ms`); // headset → laptop round trip
     this.extra.textContent = info.online ? parts.join("  ") : "";
+    // Diagnostics: "system" = frames/s the headset OS gives to the app, "sent" = frames/s sent to this laptop.
+    // System ~1 fps -> the headset itself gives no frames; system 10+ but few arrive -> frames are lost on the way.
+    if (info.online && s.capturing && s.sysFps != null) {
+      const d = [info.model, `system ${s.sysFps} fps`].filter(Boolean);
+      if (this.active) d.push(`sent ${Math.round(s.sentFps * 10) / 10} fps`);
+      if (s.capture) d.push(`capture ${s.capture}`);
+      if (s.source) d.push(`screen ${s.source}${s.hz ? " " + s.hz + " Hz" : ""}`);
+      this.diag.textContent = d.join(" · ");
+      this.diag.title = [info.model, info.version && "app " + info.version, s.os && "OS " + s.os].filter(Boolean).join(" · ");
+    } else this.diag.textContent = "";
     if (this.active && Date.now() - this.lastFrameAt < 5000) return;
     if (!info.online) this.setState("bad", "Offline — headset not connected");
     else if (s.capturing === false) this.setState("bad", "Capture stopped — tap Iniciar on headset");
