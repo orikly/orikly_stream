@@ -90,11 +90,15 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
                             sentTimes.poll()?.let { sentAt ->
                                 val rtt = now - sentAt
                                 StreamState.relayRttMs = (StreamState.relayRttMs * 3 + rtt) / 4
+                                noteRtt(now, rtt)
                             }
                         } else if (msg.optString("type") == "want") {
                             acksEnabled = msg.optBoolean("acks") // сервер старее v0.3.3 подтверждений не шлёт
                             val on = msg.optBoolean("on")
                             StreamState.relayHq = msg.optBoolean("hq")
+                            val fps = msg.optInt("fps", 0) // сервер старее 0.4.6 частоту не присылает
+                            StreamState.targetFps =
+                                if (fps > 0) fps.coerceIn(1, StreamState.MAX_FPS) else StreamState.TARGET_FPS
                             val wasOn = StreamState.relayWant
                             StreamState.relayWant = on
                             if (on && !wasOn) StreamState.requestFrames(0)
@@ -120,6 +124,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             acksEnabled = false
             inFlight.set(0)
             sentTimes.clear()
+            synchronized(rttSamples) { rttSamples.clear() }
             StreamState.relayRttMs = 0
             opened.await(20, TimeUnit.SECONDS)
 
@@ -133,6 +138,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             }
 
             socket = null
+            StreamState.targetFps = StreamState.TARGET_FPS
             StreamState.relayWant = false
             StreamState.relayHq = false
             StreamState.relayLevel = 0
@@ -173,7 +179,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             }
             val (seq, jpeg) = StreamState.awaitNewer(lastSeq, 500)
             if (jpeg == null || seq == lastSeq) continue
-            if (acksEnabled && inFlight.get() >= MAX_IN_FLIGHT) {
+            if (acksEnabled && !canSend(now)) {
                 if (now - lastAckAt > ACK_STUCK_MS && now - lastSentAt > ACK_STUCK_MS) {
                     inFlight.set(0); sentTimes.clear() // подтверждения потерялись — не зависаем навсегда
                 } else {
@@ -199,8 +205,37 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
         }
     }
 
+    // Отклики за последние RTT_WINDOW_MS: самый маленький — это «чистое» время пути без очереди.
+    private val rttSamples = ArrayDeque<Pair<Long, Long>>()
+
+    private fun noteRtt(now: Long, rtt: Long) = synchronized(rttSamples) {
+        rttSamples.addLast(now to rtt)
+        while (rttSamples.isNotEmpty() && now - rttSamples.first().first > RTT_WINDOW_MS) rttSamples.removeFirst()
+    }
+
     /**
-     * Держим 10 кадров/с: если за 2 с выброшено >10% кадров — ступень качества ниже;
+     * Можно ли отправить ещё кадр, пока не пришли подтверждения прошлых.
+     * Чтобы шло N кадров/с при отклике канала R, в пути должно быть около N × R кадров: при окне в 3 кадра
+     * и отклике 300 мс выходило не больше 10 кадров/с, при 1 с — 3 кадра/с.
+     * Поэтому: до MIN_IN_FLIGHT кадров — всегда (как раньше); больше (до MAX_IN_FLIGHT) — только если самый
+     * старый неподтверждённый кадр в пути не дольше «чистого» отклика + QUEUE_SLACK_MS. «Чистый» — самый
+     * маленький за RTT_WINDOW_MS, без очереди. Если канал забился и кадры встали в очередь, лишние кадры
+     * не шлются: задержка не копится, а самый свежий кадр уходит, как только освободится место.
+     */
+    private fun canSend(now: Long): Boolean {
+        val n = inFlight.get()
+        if (n < MIN_IN_FLIGHT) return true
+        if (n >= MAX_IN_FLIGHT) return false
+        val minRtt = synchronized(rttSamples) {
+            while (rttSamples.isNotEmpty() && now - rttSamples.first().first > RTT_WINDOW_MS) rttSamples.removeFirst()
+            rttSamples.minOfOrNull { it.second }
+        } ?: return false
+        val oldest = sentTimes.peek() ?: return true
+        return now - oldest < minRtt + QUEUE_SLACK_MS
+    }
+
+    /**
+     * Держим заданную частоту кадров: если за 2 с выброшено >10% кадров — ступень качества ниже;
      * если 6 с без потерь — ступень выше. Возвращает true, если ступень сменилась.
      */
     private fun adapt(sent: Int, dropped: Int, now: Long, calmSince: Long): Boolean {
@@ -233,6 +268,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             .put("type", "status")
             .put("capturing", st.status == StreamState.Status.RUNNING)
             .put("fps", st.fps)
+            .put("targetFps", st.targetFps)
             .put("sentFps", st.relaySentFps)
             .put("level", st.relayLevel)
             .put("rtt", st.relayRttMs)
@@ -252,7 +288,10 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
     companion object {
         private const val TAG = "OriklyRelay"
         private const val MIN_BACKLOG_BYTES = 32L * 1024
-        private const val MAX_IN_FLIGHT = 3 // ~10 кадров/с даже при отклике канала до ~300 мс
+        private const val MIN_IN_FLIGHT = 3
+        private const val MAX_IN_FLIGHT = 8
+        private const val RTT_WINDOW_MS = 30_000L
+        private const val QUEUE_SLACK_MS = 60L
         private const val ACK_STUCK_MS = 5000L
     }
 }

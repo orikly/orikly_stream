@@ -3,3 +3,5 @@
 package main
 
 func disableQuickEdit() {}
+
+func keepAwake() {} // macOS: caffeinate in main.go

@@ -9,7 +9,7 @@
 const CONFIG = {
   port: 8080,
   key: "CHANGE_ME",          // same as STREAM_KEY secret in GitHub
-  fps: 10,                   // recording frame rate
+  fps: 15,                   // recording frame rate (server mode: the FPS chosen at the top of the page)
   videoBitsPerSecond: 1000000,
   devices: [
     { name: "Q3-01", ip: "192.168.1.101" },
@@ -91,6 +91,8 @@ const CONFIG = {
   <h1>Orikly Class View</h1>
   <button id="startAll" class="primary">Start all</button>
   <button id="stopAll">Stop all</button>
+  <label id="fpsBox" title="Frames per second asked from every headset (headsets with app 0.4.6+)">FPS
+    <select id="fpsSelect"><option>10</option><option>15</option><option>20</option></select></label>
   <label><input type="checkbox" id="recordToggle" checked> Record</label>
   <button id="pickFolder">Choose folder…</button>
   <span id="folderName" class="muted">No folder — recordings will download on stop</span>
@@ -435,7 +437,7 @@ class Tile {
     // System ~1 fps -> the headset itself gives no frames; system 10+ but few arrive -> frames are lost on the way.
     if (info.online && s.capturing && s.sysFps != null) {
       const d = [info.model, `system ${s.sysFps} fps`].filter(Boolean);
-      if (this.active) d.push(`sent ${Math.round(s.sentFps * 10) / 10} fps`);
+      if (this.active) d.push(`sent ${Math.round(s.sentFps * 10) / 10}${s.targetFps ? " of " + s.targetFps : ""} fps`);
       if (s.capture) d.push(`capture ${s.capture}`);
       if (s.source) d.push(`screen ${s.source}${s.hz ? " " + s.hz + " Hz" : ""}`);
       this.diag.textContent = d.join(" · ");
@@ -610,6 +612,17 @@ window.addEventListener("beforeunload", (e) => {
 
 (async () => {
   if (!SERVER_MODE && (!CONFIG.key || CONFIG.key === "CHANGE_ME")) warn("Open Settings and enter the access key (same as the STREAM_KEY secret).");
+  if (SERVER_MODE) {
+    try { CONFIG.fps = (await (await fetch("/api/fps", { cache: "no-store" })).json()).fps || CONFIG.fps; } catch {}
+    const sel = $("fpsSelect");
+    if (![...sel.options].some((o) => +o.value === CONFIG.fps)) sel.add(new Option(String(CONFIG.fps)));
+    sel.value = String(CONFIG.fps);
+    sel.onchange = async () => {
+      try {
+        CONFIG.fps = (await (await fetch(`/api/fps?fps=${sel.value}`, { method: "POST" })).json()).fps;
+      } catch { warn("Cannot change FPS: server program is not running."); }
+    };
+  } else $("fpsBox").style.display = "none";
   folder = (await kvGet("folder")) || null;
   showFolder();
   if (SERVER_MODE) {

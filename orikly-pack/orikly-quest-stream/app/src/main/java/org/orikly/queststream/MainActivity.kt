@@ -134,8 +134,8 @@ class MainActivity : Activity() {
         }
         // Диагностика: «sistema» — кадры/с от самой системы, «enviados» — кадры/с, ушедшие на ноутбук.
         diagView.text = if (st.status == StreamState.Status.RUNNING)
-            "Diagnóstico: sistema %.1f fps · enviados %.1f fps · captura %dx%d · pantalla %dx%d %d Hz"
-                .format(st.systemFps, st.relaySentFps, st.captureWidth, st.captureHeight,
+            "Diagnóstico: sistema %.1f fps · enviados %.1f de %d fps · captura %dx%d · pantalla %dx%d %d Hz"
+                .format(st.systemFps, st.relaySentFps, st.targetFps, st.captureWidth, st.captureHeight,
                     st.sourceWidth, st.sourceHeight, Math.round(st.displayHz))
         else ""
         button.text = if (st.status == StreamState.Status.RUNNING) "Detener transmisión" else "Iniciar transmisión"

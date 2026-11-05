@@ -36,6 +36,20 @@ var indexHTML []byte
 type config struct {
 	Key  string `json:"key"`
 	Port int    `json:"port"`
+	FPS  int    `json:"fps,omitempty"` // frames per second asked from headsets; chosen on the page
+}
+
+var (
+	fpsMu      sync.Mutex
+	configPath string
+)
+
+const defaultFPS, maxFPS = 15, 30
+
+func currentFPS() int {
+	fpsMu.Lock()
+	defer fpsMu.Unlock()
+	return cfg.FPS
 }
 
 type device struct {
@@ -95,7 +109,8 @@ func (d *device) sendWant() {
 	defer d.writeMu.Unlock()
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	// acks: this server confirms every frame, so the headset keeps only a few frames in flight.
-	conn.WriteJSON(map[string]any{"type": "want", "on": on, "hq": hq, "acks": true})
+	// fps: headsets before 0.4.6 ignore it and send 10 frames/s.
+	conn.WriteJSON(map[string]any{"type": "want", "on": on, "hq": hq, "acks": true, "fps": currentFPS()})
 }
 
 // ack confirms a received frame. Without this, frames piled up in Cloudflare and network
@@ -257,6 +272,42 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(out)
+}
+
+// handleFPS: GET returns the frame rate, POST ?fps=N changes it for all headsets and saves it.
+func handleFPS(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		if o := r.Header.Get("Origin"); o != "" && !strings.HasSuffix(o, "://"+r.Host) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		n, err := strconv.Atoi(r.URL.Query().Get("fps"))
+		if err != nil || n < 1 || n > maxFPS {
+			http.Error(w, "bad fps", http.StatusBadRequest)
+			return
+		}
+		fpsMu.Lock()
+		changed := cfg.FPS != n
+		cfg.FPS = n
+		b, _ := json.MarshalIndent(cfg, "", "  ")
+		fpsMu.Unlock()
+		if changed {
+			os.WriteFile(configPath, b, 0o600)
+			log.Printf("frame rate set to %d fps", n)
+			devices.mu.Lock()
+			list := make([]*device, 0, len(devices.devices))
+			for _, d := range devices.devices {
+				list = append(list, d)
+			}
+			devices.mu.Unlock()
+			for _, d := range list {
+				d.sendWant()
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(map[string]int{"fps": currentFPS()})
 }
 
 // openViewer finds an online headset, or answers 404.
@@ -440,11 +491,15 @@ func clientIP(r *http.Request) string {
 func loadConfig() {
 	exe, _ := os.Executable()
 	path := filepath.Join(filepath.Dir(exe), "orikly-server.json")
+	configPath = path
 	if b, err := os.ReadFile(path); err == nil {
 		json.Unmarshal(b, &cfg)
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 8090
+	}
+	if cfg.FPS < 1 || cfg.FPS > maxFPS {
+		cfg.FPS = defaultFPS
 	}
 	if strings.TrimSpace(cfg.Key) == "" {
 		fmt.Print("First start. Enter the access key (the same as STREAM_KEY in GitHub): ")
@@ -495,10 +550,12 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/push", handlePush)
 	mux.HandleFunc("/api/devices", localOnly(handleDevices))
+	mux.HandleFunc("/api/fps", localOnly(handleFPS))
 	mux.HandleFunc("/stream/", localOnly(handleStream))
 	mux.HandleFunc("/view/", localOnly(handleView))
 	mux.HandleFunc("/", localOnly(handleIndex))
 
+	keepAwake() // Windows
 	if runtime.GOOS == "darwin" {
 		// Keep the Mac awake while the server runs (it stops when this program exits).
 		exec.Command("caffeinate", "-di", "-w", strconv.Itoa(os.Getpid())).Start()

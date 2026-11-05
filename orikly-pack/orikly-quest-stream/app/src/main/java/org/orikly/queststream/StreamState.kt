@@ -4,7 +4,10 @@ package org.orikly.queststream
 object StreamState {
     const val PORT = 8080
     const val TARGET_HEIGHT = 480
-    const val TARGET_FPS = 10
+    /** Частота по умолчанию; ноутбук может попросить другую (поле "fps" в "want"), не больше MAX_FPS. */
+    const val TARGET_FPS = 15
+    const val MAX_FPS = 30
+    @Volatile var targetFps = TARGET_FPS
     /** Высокое качество — для разворота одних очков на весь экран (?hq=1). Качество JPEG — в лестницах ниже. */
     const val HQ_HEIGHT = 960
     const val MAX_STREAM_CLIENTS = 4

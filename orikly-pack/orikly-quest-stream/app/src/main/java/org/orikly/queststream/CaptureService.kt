@@ -176,9 +176,9 @@ class CaptureService : Service() {
             val now = SystemClock.elapsedRealtime()
             val wanted = StreamState.wantsFrames(now)
             // Без зрителей только обновляем кадр в памяти раз в секунду (дёшево), без JPEG.
-            val interval = if (wanted) 1000L / StreamState.TARGET_FPS else 1000L
-            // Расписание с шагом ровно interval: экран даёт кадры каждые ~14 мс (72 Гц),
-            // и простое «прошло ≥100 мс» давало ~9 кадров/с вместо 10.
+            val interval = if (wanted) 1000L / StreamState.targetFps.coerceIn(1, StreamState.MAX_FPS) else 1000L
+            // Расписание с шагом ровно interval: система даёт кадры неровно (30–72 Гц),
+            // и простое «прошло ≥ interval» давало меньше кадров, чем нужно (было ~9 вместо 10).
             if (nextFrameAt - now > interval) nextFrameAt = now // зритель только что появился: не ждать «холостую» секунду
             if (now < nextFrameAt) return
             nextFrameAt = if (now - nextFrameAt > interval) now + interval else nextFrameAt + interval
