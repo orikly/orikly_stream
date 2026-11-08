@@ -284,6 +284,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             .put("app", AppWatcher.label ?: JSONObject.NULL)
             .put("appPkg", AppWatcher.pkg ?: JSONObject.NULL)
             .put("appState", AppWatcher.state)
+            .put("appEvent", AppWatcher.lastEvent)
             .put("serials", JSONObject(DeviceInfo.serials as Map<*, *>))
             .put("battery", DeviceInfo.battery(ctx) ?: JSONObject.NULL)
             .put("rssi", DeviceInfo.rssi(ctx) ?: JSONObject.NULL)

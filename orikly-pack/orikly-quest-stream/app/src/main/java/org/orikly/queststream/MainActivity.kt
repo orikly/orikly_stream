@@ -154,7 +154,7 @@ class MainActivity : Activity() {
                 .format(st.systemFps, st.relaySentFps, st.targetFps, st.captureWidth, st.captureHeight,
                     st.sourceWidth, st.sourceHeight, Math.round(st.displayHz))
         else ""
-        val app = AppWatcher.label?.let { "$it (${AppWatcher.state})" } ?: "—"
+        val app = AppWatcher.label?.let { "$it (${AppWatcher.state}, último evento: ${AppWatcher.lastEvent})" } ?: "—"
         diagView.append(
             (if (diagView.text.isEmpty()) "" else "\n") +
                 when {

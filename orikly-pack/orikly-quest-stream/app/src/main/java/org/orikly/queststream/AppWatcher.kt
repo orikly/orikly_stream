@@ -21,6 +21,11 @@ object AppWatcher {
     @Volatile var label: String? = null
     /** running — на экране; paused — открыто меню / ушло в фон, но не закрыто; closed — закрыто. */
     @Volatile var state = ""
+    /** Последнее системное событие текущего приложения — для проверки на очках, как Quest сообщает о закрытии. */
+    @Volatile var lastEvent = ""
+
+    // В публичном SDK этой константы нет (она скрыта), но значение у системы — 24 (Android 10+).
+    private const val ACTIVITY_DESTROYED = 24
 
     private var lastEventTime = 0L
     private val liveActivities = mutableSetOf<String>() // окна текущего приложения, которые ещё не закрыты
@@ -67,6 +72,15 @@ object AppWatcher {
             val p = e.packageName ?: continue
             if (ignored(ctx, p)) continue
             val activity = e.className ?: ""
+            if (p == pkg || e.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
+                lastEvent = when (e.eventType) {
+                    UsageEvents.Event.ACTIVITY_RESUMED -> "RESUMED"
+                    UsageEvents.Event.ACTIVITY_PAUSED -> "PAUSED"
+                    UsageEvents.Event.ACTIVITY_STOPPED -> "STOPPED"
+                    ACTIVITY_DESTROYED -> "DESTROYED"
+                    else -> lastEvent
+                }
+            }
             when (e.eventType) {
                 UsageEvents.Event.ACTIVITY_RESUMED -> {
                     if (p != pkg) {
@@ -82,7 +96,7 @@ object AppWatcher {
                         liveActivities += activity
                         state = "paused"
                     }
-                UsageEvents.Event.ACTIVITY_DESTROYED -> if (p == pkg) {
+                ACTIVITY_DESTROYED -> if (p == pkg) {
                     liveActivities -= activity
                     if (liveActivities.isEmpty()) state = "closed"
                 }
@@ -98,6 +112,6 @@ object AppWatcher {
     fun reset() {
         lastEventTime = 0L
         liveActivities.clear()
-        pkg = null; label = null; state = ""
+        pkg = null; label = null; state = ""; lastEvent = ""
     }
 }
