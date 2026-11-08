@@ -465,8 +465,8 @@ class Tile {
     if (!info.online) this.appLine.textContent = "";
     else if (s.usageAccess === false) this.appLine.textContent = "App: unknown — allow Usage access on the headset";
     else if (s.usageAccess) this.appLine.textContent = `App: ${s.app || s.appPkg || "none"}${stateText[s.appState] || ""}`;
-    this.appLine.title = s.appPkg ? `${s.appPkg}${s.appEvent ? " · last event " + s.appEvent : ""}` : "";
     else this.appLine.textContent = "";
+    this.appLine.title = s.appPkg ? `${s.appPkg}${s.appEvent ? " · last event " + s.appEvent : ""}` : "";
     if (s.app) knownApps.add(s.app);
     // Serial number: every non-empty answer, shown on hover; a real-looking one goes into the title.
     if (s.serials) {

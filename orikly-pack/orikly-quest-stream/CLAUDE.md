@@ -210,6 +210,7 @@
 ## Как работать с кодом (для Claude)
 
 - Минимум кода и зависимостей; никакой телеметрии и аналитики.
+- **После любой правки страницы:** `node --check` для каждого `<script>` + полный прогон в Playwright с поддельными очками (плитки появились, Start, разворот). В 0.4.10 строка, вставленная внутрь `if … else`, сломала весь скрипт — плиток не было; тест проверял только список FPS.
 - **Проверять Kotlin против публичного `android.jar`** (`https://raw.githubusercontent.com/Sable/android-platforms/master/android-34/android.jar`): `android-all` от Robolectric содержит скрытые API, и с ним прошла `UsageEvents.Event.ACTIVITY_DESTROYED`, которой нет в SDK → сборка 0.4.9 в GitHub упала. Скрытые константы — числом (DESTROYED = 24).
 - В облачной среде нет Android SDK (dl.google.com закрыт). Раньше проверка Kotlin — компиляция против `org.robolectric:android-all:14-robolectric-10818077` + `okhttp:4.12.0` (Maven Central через зеркало `https://maven-central.storage-download.googleapis.com/maven2`, обычный иногда отдаёт 429) с заглушкой `BuildConfig` (`STREAM_KEY`, `VERSION_NAME`, `RELAY_URL`). Настоящий APK собирается только в GitHub Actions — честно говорить Paul, что на очках не проверено.
 - Go-сервер собирать для Windows и Mac; перед сборкой копировать `viewer/index.html` в `server/index.html` (go:embed; файл в .gitignore).
