@@ -74,6 +74,13 @@ const CONFIG = {
   .tile.expanded { position: fixed; inset: 0; z-index: 10; border-radius: 0; border: 0; }
   .tile.expanded .screen { flex: 1; min-height: 0; aspect-ratio: auto; cursor: zoom-out; }
   .diag { font-size: 11px; }
+  /* headset outside the lesson app */
+  .tile.left { border-color: var(--bad); box-shadow: 0 0 0 3px var(--bad); }
+  .lessonline { font-size: 12px; font-weight: 600; color: var(--bad); display: none; }
+  .tile.left .lessonline { display: block; }
+  .appline { font-size: 12px; }
+  #lessonInput { font: inherit; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px;
+                 background: var(--bg); color: var(--text); width: 180px; }
   dialog { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--text);
            padding: 16px; width: min(560px, calc(100vw - 32px)); }
   dialog::backdrop { background: rgba(0,0,0,.5); }
@@ -91,6 +98,9 @@ const CONFIG = {
   <h1>Orikly Class View</h1>
   <button id="startAll" class="primary">Start all</button>
   <button id="stopAll">Stop all</button>
+  <label id="lessonBox" title="App of this lesson, as shown on the tiles. Empty = no check.">Lesson app
+    <input id="lessonInput" list="appList" placeholder="type or pick…" autocomplete="off"></label>
+  <datalist id="appList"></datalist>
   <label id="fpsBox" title="Frames per second asked from every headset (headsets with app 0.4.6+)">FPS
     <select id="fpsSelect"><option>10</option><option>15</option><option>20</option></select></label>
   <label><input type="checkbox" id="recordToggle" checked> Record</label>
@@ -190,6 +200,8 @@ class Tile {
         <div class="row"><span class="name"></span><button class="toggle primary">Start</button></div>
         <div class="row info"><span class="state"><span class="dot"></span><span class="stext">Checking…</span></span>
           <span class="muted extra"></span></div>
+        <div class="lessonline"></div>
+        <div class="appline muted"></div>
         <div class="muted diag"></div>
       </div>`;
     this.canvas = this.el.querySelector("canvas");
@@ -200,6 +212,8 @@ class Tile {
     this.stext = this.el.querySelector(".stext");
     this.extra = this.el.querySelector(".extra");
     this.diag = this.el.querySelector(".diag");
+    this.lessonLine = this.el.querySelector(".lessonline");
+    this.appLine = this.el.querySelector(".appline");
     this.nameEl = this.el.querySelector(".name");
     this.showTitle();
     if (SERVER_MODE) {
@@ -215,7 +229,8 @@ class Tile {
   // Server mode: own name given on this laptop, else what the server reports.
   title() {
     if (!SERVER_MODE) return this.dev.name;
-    return labels()[this.dev.id] || this.dev.label || this.dev.name || this.dev.id;
+    const sn = this.dev.serial ? `${this.dev.name || "Quest"} · SN ${this.dev.serial}` : "";
+    return labels()[this.dev.id] || sn || this.dev.label || this.dev.name || this.dev.id;
   }
 
   showTitle() {
@@ -443,6 +458,24 @@ class Tile {
       this.diag.textContent = d.join(" · ");
       this.diag.title = [info.model, info.version && "app " + info.version, s.os && "OS " + s.os].filter(Boolean).join(" · ");
     } else this.diag.textContent = "";
+    // Lesson app check (decided by the server program).
+    this.el.classList.toggle("left", info.lesson === "left");
+    this.lessonLine.textContent = info.lesson === "left" ? `⚠ Left lesson app: ${info.lessonText}` : "";
+    const stateText = { running: "", paused: " (menu / paused)", closed: " (closed)" };
+    if (!info.online) this.appLine.textContent = "";
+    else if (s.usageAccess === false) this.appLine.textContent = "App: unknown — allow Usage access on the headset";
+    else if (s.usageAccess) this.appLine.textContent = `App: ${s.app || s.appPkg || "none"}${stateText[s.appState] || ""}`;
+    else this.appLine.textContent = "";
+    if (s.app) knownApps.add(s.app);
+    // Serial number: every non-empty answer, shown on hover; a real-looking one goes into the title.
+    if (s.serials) {
+      const all = Object.entries(s.serials).map(([k, v]) => `${k}=${v}`).join("\n");
+      const base = [info.model, info.version && "app " + info.version, s.os && "OS " + s.os].filter(Boolean).join(" · ");
+      this.diag.title = base + "\nSerial number attempts:\n" + all;
+      const real = Object.values(s.serials).find((v) => /^[A-Za-z0-9]{8,}$/.test(v) && !/^unknown$/i.test(v));
+      if (real && this.dev.serial !== real) { this.dev.serial = real; this.showTitle(); sortTiles(); }
+      if (!real) this.diag.textContent += (this.diag.textContent ? " · " : "") + "SN: " + Object.entries(s.serials).map(([k, v]) => `${k}=${v}`).join(", ");
+    }
     if (this.active && Date.now() - this.lastFrameAt < 5000) return;
     if (!info.online) this.setState("bad", "Offline — headset not connected");
     else if (s.capturing === false) this.setState("bad", "Capture stopped — tap Iniciar on headset");
@@ -525,6 +558,13 @@ function saveSettings() {
 
 // ---------- page ----------
 const tiles = [];
+// App names reported by headsets: suggestions for the lesson app field (the teacher still chooses).
+const knownApps = new Set();
+function refreshAppList() {
+  const dl = $("appList");
+  const have = new Set([...dl.options].map((o) => o.value));
+  for (const a of knownApps) if (!have.has(a)) dl.appendChild(new Option(a));
+}
 function addTile(dev) {
   const t = new Tile(dev);
   tiles.push(t);
@@ -571,6 +611,7 @@ async function pollServer() {
     for (const t of tiles) if (!list.some((i) => i.id === t.dev.id)) t.applyInfo({ online: false });
     try { localStorage.setItem(KNOWN_KEY, JSON.stringify(known)); } catch {}
     updateSummary();
+    refreshAppList();
   } catch {
     warn("Server program is not running. Start orikly-server on this laptop.");
   }
@@ -622,7 +663,17 @@ window.addEventListener("beforeunload", (e) => {
         CONFIG.fps = (await (await fetch(`/api/fps?fps=${sel.value}`, { method: "POST" })).json()).fps;
       } catch { warn("Cannot change FPS: server program is not running."); }
     };
-  } else $("fpsBox").style.display = "none";
+    try { $("lessonInput").value = (await (await fetch("/api/lesson", { cache: "no-store" })).json()).app || ""; } catch {}
+    const saveLesson = async () => {
+      try {
+        const r = await fetch(`/api/lesson?app=${encodeURIComponent($("lessonInput").value.trim())}`, { method: "POST" });
+        $("lessonInput").value = (await r.json()).app;
+        pollServer();
+      } catch { warn("Cannot save the lesson app: server program is not running."); }
+    };
+    $("lessonInput").onchange = saveLesson;
+    $("lessonInput").onkeydown = (e) => { if (e.key === "Enter") $("lessonInput").blur(); };
+  } else { $("fpsBox").style.display = "none"; $("lessonBox").style.display = "none"; }
   folder = (await kvGet("folder")) || null;
   showFolder();
   if (SERVER_MODE) {

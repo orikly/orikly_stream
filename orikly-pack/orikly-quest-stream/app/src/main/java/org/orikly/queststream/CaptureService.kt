@@ -120,6 +120,7 @@ class CaptureService : Service() {
             StreamState.captureHeight = outH
             StreamState.displayHz = display.refreshRate
             startSystemFpsMeter(handler)
+            startAppWatcher(handler)
 
             val ir = ImageReader.newInstance(outW, outH, PixelFormat.RGBA_8888, 2)
             reader = ir
@@ -163,6 +164,18 @@ class CaptureService : Service() {
                 handler.postDelayed(this, 2000)
             }
         }, 2000)
+    }
+
+    /** Раз в секунду: в каком приложении ученик (нужно разрешение Usage access). */
+    private fun startAppWatcher(handler: Handler) {
+        AppWatcher.reset()
+        handler.post(object : Runnable {
+            override fun run() {
+                if (projection == null) return
+                runCatching { AppWatcher.poll(this@CaptureService) }.onFailure { Log.w(TAG, "app watcher", it) }
+                handler.postDelayed(this, 1000)
+            }
+        })
     }
 
     private fun onImage(ir: ImageReader) {

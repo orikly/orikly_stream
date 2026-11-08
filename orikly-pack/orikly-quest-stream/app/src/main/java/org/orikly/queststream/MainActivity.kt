@@ -105,12 +105,28 @@ class MainActivity : Activity() {
         if (requestCode != REQ_CAPTURE) return
         if (resultCode == RESULT_OK && data != null) {
             CaptureService.start(this, resultCode, data)
+            // Один раз на очках: разрешение «Доступ к истории использования» — чтобы учитель видел, в каком приложении ученик.
+            if (!AppWatcher.checkAccess(this)) openUsageAccessSettings()
         } else {
             StreamState.status = StreamState.Status.ERROR
             StreamState.errorText = "Permiso denegado"
         }
         refresh()
     }
+
+    private fun openUsageAccessSettings() {
+        val action = android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS
+        val tries = listOf(
+            Intent(action, android.net.Uri.parse("package:$packageName")), // сразу наше приложение (Android 10+)
+            Intent(action),
+        )
+        for (i in tries) {
+            if (runCatching { startActivity(i) }.isSuccess) return
+        }
+        usageAccessMissing = true
+    }
+
+    private var usageAccessMissing = false
 
     private fun refresh() {
         nameView.text = DeviceInfo.name(this)
@@ -138,6 +154,16 @@ class MainActivity : Activity() {
                 .format(st.systemFps, st.relaySentFps, st.targetFps, st.captureWidth, st.captureHeight,
                     st.sourceWidth, st.sourceHeight, Math.round(st.displayHz))
         else ""
+        val app = AppWatcher.label?.let { "$it (${AppWatcher.state})" } ?: "—"
+        diagView.append(
+            (if (diagView.text.isEmpty()) "" else "\n") +
+                when {
+                    AppWatcher.checkAccess(this) -> "Aplicación: $app"
+                    usageAccessMissing -> "Acceso de uso: no disponible en este dispositivo"
+                    else -> "Acceso de uso: no concedido (se pedirá al pulsar «Iniciar»)"
+                } +
+                "\nN.º de serie: " + DeviceInfo.serials.entries.joinToString(" · ") { "${it.key}=${it.value}" }
+        )
         button.text = if (st.status == StreamState.Status.RUNNING) "Detener transmisión" else "Iniciar transmisión"
     }
 

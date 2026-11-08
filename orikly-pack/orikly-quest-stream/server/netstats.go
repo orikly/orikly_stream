@@ -26,6 +26,7 @@ type netCounters struct {
 	frames      int
 	maxGap      time.Duration
 	freezes     int
+	lessonText  string // last logged lesson state, to log only changes
 }
 
 // headsetStatus: the fields of the headset's status message we print.
@@ -81,12 +82,26 @@ func monitorNetwork() {
 		sort.Slice(list, func(i, j int) bool { return list[i].id < list[j].id })
 
 		report := now.Sub(lastReport) >= 10*time.Second
+		lesson := currentLesson()
 		var parts []string
 		var total int64
 		for _, d := range list {
 			d.mu.Lock()
 			n := &d.net
 			watched := d.viewers > 0 && d.conn != nil
+			if ls, lt := d.lessonCheck(lesson); ls == "left" || ls == "ok" {
+				if ls == "ok" {
+					lt = "ok"
+				}
+				if lt != n.lessonText {
+					if ls == "left" {
+						log.Printf("LEFT LESSON: %s — %s", d.label(), lt)
+					} else if n.lessonText != "" {
+						log.Printf("back in lesson: %s", d.label())
+					}
+					n.lessonText = lt
+				}
+			}
 			if watched && n.freezeStart.IsZero() && now.Sub(n.lastFrameAt) > freezeAfter {
 				n.freezeStart = n.lastFrameAt
 				n.freezes++

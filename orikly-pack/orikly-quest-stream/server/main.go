@@ -34,9 +34,10 @@ import (
 var indexHTML []byte
 
 type config struct {
-	Key  string `json:"key"`
-	Port int    `json:"port"`
-	FPS  int    `json:"fps,omitempty"` // frames per second asked from headsets; chosen on the page
+	Key    string `json:"key"`
+	Port   int    `json:"port"`
+	FPS    int    `json:"fps,omitempty"`    // frames per second asked from headsets; chosen on the page
+	Lesson string `json:"lesson,omitempty"` // lesson app typed by the teacher on the page
 }
 
 var (
@@ -254,12 +255,16 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 		Version string          `json:"version"`
 		Viewers int             `json:"viewers"`
 		Status  json.RawMessage `json:"status,omitempty"`
+		Lesson  string          `json:"lesson,omitempty"`     // "", noinfo, ok, left
+		Left    string          `json:"lessonText,omitempty"` // where the headset is instead
 	}
+	lesson := currentLesson()
 	out := []item{}
 	count := map[string]int{}
 	for _, d := range list {
 		d.mu.Lock()
-		out = append(out, item{d.id, d.name, d.name, d.conn != nil, d.model, d.version, d.viewers, d.status})
+		ls, lt := d.lessonCheck(lesson)
+		out = append(out, item{d.id, d.name, d.name, d.conn != nil, d.model, d.version, d.viewers, d.status, ls, lt})
 		d.mu.Unlock()
 		count[d.name]++
 	}
@@ -551,6 +556,7 @@ func main() {
 	mux.HandleFunc("/push", handlePush)
 	mux.HandleFunc("/api/devices", localOnly(handleDevices))
 	mux.HandleFunc("/api/fps", localOnly(handleFPS))
+	mux.HandleFunc("/api/lesson", localOnly(handleLesson))
 	mux.HandleFunc("/stream/", localOnly(handleStream))
 	mux.HandleFunc("/view/", localOnly(handleView))
 	mux.HandleFunc("/", localOnly(handleIndex))

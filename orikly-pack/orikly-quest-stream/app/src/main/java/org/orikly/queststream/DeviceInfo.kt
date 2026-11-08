@@ -24,6 +24,28 @@ object DeviceInfo {
         return "${Build.MODEL}-${id.takeLast(4)}"
     }
 
+    /**
+     * Серийный номер всеми способами, доступными обычному приложению. Android 10+ обычно его закрывает,
+     * поэтому возвращаем все непустые ответы с подписью, откуда они: на Quest это проверяется только на очках.
+     */
+    val serials: Map<String, String> by lazy {
+        val out = LinkedHashMap<String, String>()
+        fun put(k: String, v: String?) { v?.trim()?.takeIf { it.isNotEmpty() }?.let { out[k] = it } }
+        put("getSerial", runCatching { Build.getSerial() }.getOrElse { "error: ${it.javaClass.simpleName}" })
+        @Suppress("DEPRECATION") put("Build.SERIAL", Build.SERIAL)
+        for (prop in listOf("ro.serialno", "ro.boot.serialno")) {
+            put(prop, runCatching {
+                Class.forName("android.os.SystemProperties")
+                    .getMethod("get", String::class.java).invoke(null, prop) as String?
+            }.getOrNull())
+            put("getprop $prop", runCatching {
+                val proc = Runtime.getRuntime().exec(arrayOf("getprop", prop))
+                proc.inputStream.bufferedReader().use { it.readText() }.also { proc.waitFor() }
+            }.getOrNull())
+        }
+        out
+    }
+
     /** Уникальный номер устройства: имена у очков могут совпадать (на Quest это часто просто «Quest 3»). */
     fun id(ctx: Context): String =
         Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID) ?: ""
