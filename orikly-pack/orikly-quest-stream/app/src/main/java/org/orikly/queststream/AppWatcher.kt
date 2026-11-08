@@ -38,6 +38,11 @@ object AppWatcher {
         "com.oculus.os.vrlockscreen", "com.oculus.systemdriver", "com.oculus.horizon",
     )
 
+    /** Меню / библиотека Quest с другими именами пакетов (на новых Horizon OS — «Navigator»). */
+    private fun isShellByName(p: String, label: String): Boolean =
+        p.contains("navigator", ignoreCase = true) || p.contains("vrshell", ignoreCase = true) ||
+            label.equals("Navigator", ignoreCase = true)
+
     fun checkAccess(ctx: Context): Boolean {
         val ops = ctx.getSystemService(AppOpsManager::class.java)
         hasAccess = runCatching {
@@ -48,7 +53,7 @@ object AppWatcher {
     }
 
     private fun ignored(ctx: Context, p: String): Boolean = ignoreCache.getOrPut(p) {
-        if (p == ctx.packageName || p in SYSTEM_SHELL) return@getOrPut true
+        if (p == ctx.packageName || p in SYSTEM_SHELL || isShellByName(p, labelOf(ctx, p))) return@getOrPut true
         val pm = ctx.packageManager
         val home = runCatching {
             pm.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)

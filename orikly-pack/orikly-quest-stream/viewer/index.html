@@ -102,7 +102,7 @@ const CONFIG = {
     <input id="lessonInput" list="appList" placeholder="type or pick…" autocomplete="off"></label>
   <datalist id="appList"></datalist>
   <label id="fpsBox" title="Frames per second asked from every headset (headsets with app 0.4.6+)">FPS
-    <select id="fpsSelect"><option>10</option><option>15</option><option>20</option></select></label>
+    <select id="fpsSelect"><option>10</option><option>15</option><option>20</option><option>24</option></select></label>
   <label><input type="checkbox" id="recordToggle" checked> Record</label>
   <button id="pickFolder">Choose folder…</button>
   <span id="folderName" class="muted">No folder — recordings will download on stop</span>
@@ -465,6 +465,7 @@ class Tile {
     if (!info.online) this.appLine.textContent = "";
     else if (s.usageAccess === false) this.appLine.textContent = "App: unknown — allow Usage access on the headset";
     else if (s.usageAccess) this.appLine.textContent = `App: ${s.app || s.appPkg || "none"}${stateText[s.appState] || ""}`;
+    this.appLine.title = s.appPkg ? `${s.appPkg}${s.appEvent ? " · last event " + s.appEvent : ""}` : "";
     else this.appLine.textContent = "";
     if (s.app) knownApps.add(s.app);
     // Serial number: every non-empty answer, shown on hover; a real-looking one goes into the title.
