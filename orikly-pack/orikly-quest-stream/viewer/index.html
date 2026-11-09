@@ -87,6 +87,12 @@ const CONFIG = {
   dialog h2 { margin: 0 0 12px; font-size: 16px; }
   dialog input[type=text] { font: inherit; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px;
                             background: var(--bg); color: var(--text); width: 100%; }
+  dialog textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+                    background: var(--bg); color: var(--text); width: 100%; margin-top: 4px; resize: vertical; }
+  .clrows { display: grid; grid-template-columns: 1fr 1.2fr; gap: 6px 10px; align-items: center;
+            margin: 8px 0 14px; max-height: 50vh; overflow: auto; }
+  .clrows select { font: inherit; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px;
+                   background: var(--bg); color: var(--text); width: 100%; }
   .devrows { display: grid; grid-template-columns: 1fr 1.4fr; gap: 6px; margin: 8px 0 14px; max-height: 50vh; overflow: auto; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
   #warn { padding: 8px 16px; background: #fef3c7; color: #78350f; display: none; }
@@ -101,6 +107,7 @@ const CONFIG = {
   <label id="classBox" title="Each class has its own names for the headsets">Class
     <select id="classSelect"></select></label>
   <button id="renameClass" title="Rename this class">✎</button>
+  <button id="openClassList" title="Class list: students and their headsets">Class list</button>
   <label id="lessonBox" title="App of this lesson, as shown on the tiles. Empty = no check.">Lesson app
     <input id="lessonInput" list="appList" placeholder="type or pick…" autocomplete="off"></label>
   <datalist id="appList"></datalist>
@@ -117,6 +124,14 @@ const CONFIG = {
   <label style="display:block">Access key (same as STREAM_KEY)<input type="text" id="setKey" autocomplete="off"></label>
   <div class="devrows" id="setDevices"></div>
   <div class="actions"><button id="setCancel">Cancel</button><button id="setSave" class="primary">Save</button></div>
+</dialog>
+<dialog id="classList">
+  <h2 id="clTitle">Class list</h2>
+  <label style="display:block">Students, separated by commas
+    <textarea id="clStudents" rows="3" placeholder="Ana, Pablo, Lucía, …"></textarea></label>
+  <p class="muted" id="clLeft"></p>
+  <div class="clrows" id="clRows"></div>
+  <div class="actions"><button id="clCancel">Cancel</button><button id="clSave" class="primary">Save</button></div>
 </dialog>
 <div id="warn"></div>
 <main id="grid"></main>
@@ -608,6 +623,64 @@ async function classesCall(query) {
     return true;
   } catch { warn("Cannot reach the server program to save names."); return false; }
 }
+// ---------- class list: paste the students, pick a name for every headset ----------
+const parseStudents = (text) => [...new Set(text.split(",").map((x) => x.trim()).filter(Boolean))];
+function headsetLabel(t) { return t.dev.label || t.dev.name || t.dev.id; }
+function openClassList() {
+  const c = classes.classes[classes.current];
+  if (!c) return;
+  $("clTitle").textContent = `Class list — ${c.name}`;
+  $("clStudents").value = (c.students || []).join(", ");
+  const box = $("clRows");
+  box.innerHTML = "<span class='muted'>Headset</span><span class='muted'>Student</span>";
+  for (const t of tiles) {
+    const label = document.createElement("span");
+    const online = t.dot.classList.contains("ok") || /Streaming|Online/.test(t.stext.textContent);
+    label.innerHTML = `<span class="dot ${online ? "ok" : ""}"></span>`;
+    label.append(headsetLabel(t));
+    const sel = document.createElement("select");
+    sel.dataset.id = t.dev.id;
+    sel.dataset.value = c.names[t.dev.id] || "";
+    sel.onchange = () => { sel.dataset.value = sel.value; refreshClassList(); };
+    box.append(label, sel);
+  }
+  refreshClassList();
+  $("classList").showModal();
+}
+// Every list shows the students not yet taken by another headset, so the choice shrinks as you go.
+function refreshClassList() {
+  const students = parseStudents($("clStudents").value);
+  const sels = [...document.querySelectorAll("#clRows select")];
+  const taken = new Set(sels.map((s) => s.dataset.value).filter(Boolean));
+  for (const sel of sels) {
+    const mine = sel.dataset.value;
+    sel.innerHTML = "";
+    sel.add(new Option("—", ""));
+    const options = students.filter((n) => n === mine || !taken.has(n));
+    if (mine && !students.includes(mine)) options.unshift(mine); // a name given before, not in the list
+    for (const n of options) sel.add(new Option(n, n));
+    sel.value = mine;
+  }
+  const left = students.filter((n) => !taken.has(n));
+  $("clLeft").textContent = students.length
+    ? (left.length ? `Not assigned yet (${left.length}): ${left.join(", ")}` : "Every student has a headset.")
+    : "Paste the names first.";
+}
+async function saveClassList() {
+  const names = {};
+  for (const sel of document.querySelectorAll("#clRows select")) if (sel.dataset.value) names[sel.dataset.id] = sel.dataset.value;
+  try {
+    const r = await fetch(`/api/classes?assign=${classes.current}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ students: parseStudents($("clStudents").value), names }),
+    });
+    if (!r.ok) throw new Error(r.status);
+    classes = await r.json();
+    showClasses();
+    $("classList").close();
+  } catch { alert("Cannot save: is the server program running?"); }
+}
+
 async function renameTile(tile) {
   const name = prompt(`Name of this headset in ${className()} (e.g. the student's name). Empty = default name.`, labels()[tile.dev.id] || "");
   if (name === null) return;
@@ -694,12 +767,16 @@ window.addEventListener("beforeunload", (e) => {
     $("lessonInput").onkeydown = (e) => { if (e.key === "Enter") $("lessonInput").blur(); };
     await classesCall("");
     $("classSelect").onchange = () => classesCall(`current=${$("classSelect").value}`);
+    $("openClassList").onclick = openClassList;
+    $("clStudents").oninput = refreshClassList;
+    $("clCancel").onclick = () => $("classList").close();
+    $("clSave").onclick = saveClassList;
     $("renameClass").onclick = () => {
       const n = prompt("Name of this class", className());
       if (n && n.trim()) classesCall(`rename=${classes.current}&name=${encodeURIComponent(n.trim())}`);
     };
   } else {
-    for (const id of ["fpsBox", "lessonBox", "classBox", "renameClass"]) $(id).style.display = "none";
+    for (const id of ["fpsBox", "lessonBox", "classBox", "renameClass", "openClassList"]) $(id).style.display = "none";
   }
   folder = (await kvGet("folder")) || null;
   showFolder();

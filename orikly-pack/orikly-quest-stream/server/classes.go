@@ -14,8 +14,9 @@ import (
 )
 
 type classCfg struct {
-	Name  string            `json:"name"`
-	Names map[string]string `json:"names"` // headset id -> name in this class
+	Name     string            `json:"name"`
+	Names    map[string]string `json:"names"`              // headset id -> name in this class
+	Students []string          `json:"students,omitempty"` // class list typed in "Class list" (comma-separated)
 }
 
 // ensureClasses: three classes by default. fpsMu held.
@@ -55,6 +56,7 @@ func studentName(id string) string {
 //	POST ?current=N             -> choose the class
 //	POST ?rename=N&name=X       -> rename class N
 //	POST ?class=N&id=ID&name=X  -> name of a headset in class N (empty name = remove)
+//	POST ?assign=N, body {"students": [...], "names": {id: name}} -> class list and all names of class N
 func handleClasses(w http.ResponseWriter, r *http.Request) {
 	fpsMu.Lock()
 	ensureClasses()
@@ -82,6 +84,32 @@ func handleClasses(w http.ResponseWriter, r *http.Request) {
 				cfg.Classes[n].Name = name
 				saveConfig()
 			}
+		case q.Has("assign"):
+			n, ok := idx("assign")
+			var body struct {
+				Students []string          `json:"students"`
+				Names    map[string]string `json:"names"`
+			}
+			if !ok || json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body) != nil {
+				fpsMu.Unlock()
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			students := []string{}
+			for _, s := range body.Students {
+				if s = strings.TrimSpace(s); s != "" {
+					students = append(students, s)
+				}
+			}
+			names := map[string]string{}
+			for id, s := range body.Names {
+				if s = strings.TrimSpace(s); s != "" && id != "" {
+					names[id] = s
+				}
+			}
+			cfg.Classes[n].Students, cfg.Classes[n].Names = students, names
+			log.Printf("class list saved: %s, %d students, %d headsets named", cfg.Classes[n].Name, len(students), len(names))
+			saveConfig()
 		case q.Has("class") && q.Get("id") != "":
 			if n, ok := idx("class"); ok {
 				if name == "" {
