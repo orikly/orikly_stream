@@ -23,8 +23,11 @@ func currentCrop() [2]float64 {
 	if c, ok := viewCrops[cfg.View]; ok {
 		return c
 	}
-	return viewCrops["full"]
+	return viewCrops[defaultView]
 }
+
+// defaultView: only the left eye (Paul, 0.4.12) — half the width, half the traffic.
+const defaultView = "left"
 
 // handleView: GET returns {"view": "..."}, POST ?view=full|c75|c50|left|right changes it for all headsets.
 func handleViewMode(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +57,7 @@ func handleViewMode(w http.ResponseWriter, r *http.Request) {
 	v := cfg.View
 	fpsMu.Unlock()
 	if v == "" {
-		v = "full"
+		v = defaultView
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

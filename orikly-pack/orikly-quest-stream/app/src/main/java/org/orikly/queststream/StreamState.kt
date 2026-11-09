@@ -3,7 +3,7 @@ package org.orikly.queststream
 /** Общее состояние между сервисом, HTTP-сервером и экраном приложения. */
 object StreamState {
     const val PORT = 8080
-    const val TARGET_HEIGHT = 480
+    const val TARGET_HEIGHT = 360
     /** Частота по умолчанию; ноутбук может попросить другую (поле "fps" в "want"), не больше MAX_FPS. */
     const val TARGET_FPS = 15
     const val MAX_FPS = 30
@@ -54,7 +54,7 @@ object StreamState {
     // Решение Paul (0.4.10): качество постоянное, без снижения — по одной ступени.
     // Прежние лестницы (вернуть, если канала не хватает):
     //   обычная 480/60 480/50 480/40 400/40 360/35 300/30; разворот 960/80 840/70 720/65 600/60 480/55 400/45.
-    val NORMAL_LADDER = listOf(480 to 60)
+    val NORMAL_LADDER = listOf(360 to 60) // решение Paul (0.4.12): сетка 360p — легче кадры
     val HQ_LADDER = listOf(960 to 80)
     @Volatile var relayLevel = 0
     @Volatile var relaySentFps = 0.0
