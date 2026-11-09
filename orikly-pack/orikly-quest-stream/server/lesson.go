@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 )
 
@@ -29,10 +28,11 @@ func handleLesson(w http.ResponseWriter, r *http.Request) {
 		fpsMu.Lock()
 		changed := cfg.Lesson != app
 		cfg.Lesson = app
-		b, _ := json.MarshalIndent(cfg, "", "  ")
+		if changed {
+			saveConfig()
+		}
 		fpsMu.Unlock()
 		if changed {
-			os.WriteFile(configPath, b, 0o600)
 			if app == "" {
 				log.Printf("lesson app: none (no check)")
 			} else {

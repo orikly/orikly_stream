@@ -34,10 +34,12 @@ import (
 var indexHTML []byte
 
 type config struct {
-	Key    string `json:"key"`
-	Port   int    `json:"port"`
-	FPS    int    `json:"fps,omitempty"`    // frames per second asked from headsets; chosen on the page
-	Lesson string `json:"lesson,omitempty"` // lesson app typed by the teacher on the page
+	Key     string     `json:"key"`
+	Port    int        `json:"port"`
+	FPS     int        `json:"fps,omitempty"`     // frames per second asked from headsets; chosen on the page
+	Lesson  string     `json:"lesson,omitempty"`  // lesson app typed by the teacher on the page
+	Class   int        `json:"class"`             // class chosen on the page
+	Classes []classCfg `json:"classes,omitempty"` // per class: its name and the headsets' names
 }
 
 var (
@@ -294,10 +296,11 @@ func handleFPS(w http.ResponseWriter, r *http.Request) {
 		fpsMu.Lock()
 		changed := cfg.FPS != n
 		cfg.FPS = n
-		b, _ := json.MarshalIndent(cfg, "", "  ")
+		if changed {
+			saveConfig()
+		}
 		fpsMu.Unlock()
 		if changed {
-			os.WriteFile(configPath, b, 0o600)
 			log.Printf("frame rate set to %d fps", n)
 			devices.mu.Lock()
 			list := make([]*device, 0, len(devices.devices))
@@ -503,6 +506,7 @@ func loadConfig() {
 	if cfg.Port == 0 {
 		cfg.Port = 8090
 	}
+	ensureClasses()
 	if cfg.FPS < 1 || cfg.FPS > maxFPS {
 		cfg.FPS = defaultFPS
 	}
@@ -557,6 +561,7 @@ func main() {
 	mux.HandleFunc("/api/devices", localOnly(handleDevices))
 	mux.HandleFunc("/api/fps", localOnly(handleFPS))
 	mux.HandleFunc("/api/lesson", localOnly(handleLesson))
+	mux.HandleFunc("/api/classes", localOnly(handleClasses))
 	mux.HandleFunc("/stream/", localOnly(handleStream))
 	mux.HandleFunc("/view/", localOnly(handleView))
 	mux.HandleFunc("/", localOnly(handleIndex))

@@ -98,6 +98,9 @@ const CONFIG = {
   <h1>Orikly Class View</h1>
   <button id="startAll" class="primary">Start all</button>
   <button id="stopAll">Stop all</button>
+  <label id="classBox" title="Each class has its own names for the headsets">Class
+    <select id="classSelect"></select></label>
+  <button id="renameClass" title="Rename this class">✎</button>
   <label id="lessonBox" title="App of this lesson, as shown on the tiles. Empty = no check.">Lesson app
     <input id="lessonInput" list="appList" placeholder="type or pick…" autocomplete="off"></label>
   <datalist id="appList"></datalist>
@@ -391,7 +394,8 @@ class Tile {
     const mime = pickMime();
     if (!mime) { warn("This browser cannot record video. Use Chrome."); return; }
     const ext = mime.startsWith("video/mp4") ? "mp4" : "webm";
-    const safe = this.title().replace(/[\\/:*?"<>|·]+/g, "-").replace(/\s+/g, "_");
+    const cls = SERVER_MODE && className() ? className() + "_" : "";
+    const safe = (cls + this.title()).replace(/[\\/:*?"<>|·]+/g, "-").replace(/\s+/g, "_");
     const fileName = `${safe}_${stamp()}.${ext}`;
     const h = Math.min(this.canvas.height, 480);
     const w = Math.round((this.canvas.width * h) / this.canvas.height / 2) * 2;
@@ -581,19 +585,33 @@ if (!SERVER_MODE) CONFIG.devices.forEach(addTile);
 // Server mode: headsets appear by themselves, identified by a unique id (names can repeat).
 // Headsets seen before are kept so their tiles stay in place; names given here are remembered.
 const KNOWN_KEY = "orikly-known-headsets-v2";
-const LABELS_KEY = "orikly-labels";
+// Classes and the headsets' names in each class are kept by the server program (orikly-server.json).
+let classes = { current: 0, classes: [] };
+const className = () => classes.classes[classes.current]?.name || "";
 function labels() {
-  try { return JSON.parse(localStorage.getItem(LABELS_KEY) || "{}"); } catch { return {}; }
+  return (SERVER_MODE && classes.classes[classes.current]?.names) || {};
 }
-function renameTile(tile) {
-  const current = tile.title();
-  const name = prompt("Name for this headset (e.g. Q3-01). Empty = default name.", current);
-  if (name === null) return;
-  const all = labels();
-  if (name.trim()) all[tile.dev.id] = name.trim(); else delete all[tile.dev.id];
-  try { localStorage.setItem(LABELS_KEY, JSON.stringify(all)); } catch {}
-  tile.showTitle();
+function showClasses() {
+  const sel = $("classSelect");
+  sel.innerHTML = "";
+  classes.classes.forEach((c, i) => sel.add(new Option(c.name, String(i))));
+  sel.value = String(classes.current);
+  tiles.forEach((t) => t.showTitle());
   sortTiles();
+}
+async function classesCall(query) {
+  try {
+    const r = await fetch("/api/classes" + (query ? "?" + query : ""), { method: query ? "POST" : "GET", cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    classes = await r.json();
+    showClasses();
+    return true;
+  } catch { warn("Cannot reach the server program to save names."); return false; }
+}
+async function renameTile(tile) {
+  const name = prompt(`Name of this headset in ${className()} (e.g. the student's name). Empty = default name.`, labels()[tile.dev.id] || "");
+  if (name === null) return;
+  await classesCall(`class=${classes.current}&id=${encodeURIComponent(tile.dev.id)}&name=${encodeURIComponent(name.trim())}`);
 }
 async function pollServer() {
   try {
@@ -674,7 +692,15 @@ window.addEventListener("beforeunload", (e) => {
     };
     $("lessonInput").onchange = saveLesson;
     $("lessonInput").onkeydown = (e) => { if (e.key === "Enter") $("lessonInput").blur(); };
-  } else { $("fpsBox").style.display = "none"; $("lessonBox").style.display = "none"; }
+    await classesCall("");
+    $("classSelect").onchange = () => classesCall(`current=${$("classSelect").value}`);
+    $("renameClass").onclick = () => {
+      const n = prompt("Name of this class", className());
+      if (n && n.trim()) classesCall(`rename=${classes.current}&name=${encodeURIComponent(n.trim())}`);
+    };
+  } else {
+    for (const id of ["fpsBox", "lessonBox", "classBox", "renameClass"]) $(id).style.display = "none";
+  }
   folder = (await kvGet("folder")) || null;
   showFolder();
   if (SERVER_MODE) {

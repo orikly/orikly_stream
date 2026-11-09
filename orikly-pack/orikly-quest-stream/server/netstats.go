@@ -43,7 +43,13 @@ func (d *device) parsedStatus() headsetStatus { // d.mu held
 	return s
 }
 
-func (d *device) label() string { return fmt.Sprintf("%s [%s]", d.name, shortID(d.id)) }
+// label for the log: the student's name in the current class, if given, and the headset.
+func (d *device) label() string {
+	if n := studentName(d.id); n != "" {
+		return fmt.Sprintf("%s (%s [%s])", n, d.name, shortID(d.id))
+	}
+	return fmt.Sprintf("%s [%s]", d.name, shortID(d.id))
+}
 
 // onFrame is called with d.mu held for every frame received from the headset.
 func (d *device) onFrame(size int) {
