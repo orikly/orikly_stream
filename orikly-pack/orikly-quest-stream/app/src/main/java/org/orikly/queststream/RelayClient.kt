@@ -96,13 +96,20 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
                             acksEnabled = msg.optBoolean("acks") // сервер старее v0.3.3 подтверждений не шлёт
                             val on = msg.optBoolean("on")
                             StreamState.relayHq = msg.optBoolean("hq")
+                            // "crop": [левый край, правый край] по ширине, 0..1 (сервер старее 0.4.11 не присылает — весь кадр)
+                            val crop = msg.optJSONArray("crop")
+                            val newL = crop?.optDouble(0, 0.0)?.toFloat() ?: 0f
+                            val newR = crop?.optDouble(1, 1.0)?.toFloat() ?: 1f
+                            val cropChanged = newL != StreamState.cropLeft || newR != StreamState.cropRight
+                            StreamState.cropLeft = newL
+                            StreamState.cropRight = newR
                             val fps = msg.optInt("fps", 0) // сервер старее 0.4.6 частоту не присылает
                             StreamState.targetFps =
                                 if (fps > 0) fps.coerceIn(1, StreamState.MAX_FPS) else StreamState.TARGET_FPS
                             val wasOn = StreamState.relayWant
                             StreamState.relayWant = on
                             if (on && !wasOn) StreamState.requestFrames(0)
-                            else if (on) StreamState.onFrameWanted?.invoke() // качество сменилось — свежий кадр сразу
+                            else if (on || cropChanged) StreamState.onFrameWanted?.invoke() // качество/обрезка сменились — свежий кадр сразу
                         }
                     }
                 }
@@ -269,6 +276,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             .put("capturing", st.status == StreamState.Status.RUNNING)
             .put("fps", st.fps)
             .put("targetFps", st.targetFps)
+            .put("crop", "${st.cropLeft}-${st.cropRight}")
             .put("sentFps", st.relaySentFps)
             .put("level", st.relayLevel)
             .put("rtt", st.relayRttMs)

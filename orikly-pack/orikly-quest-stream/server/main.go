@@ -38,6 +38,7 @@ type config struct {
 	Port    int        `json:"port"`
 	FPS     int        `json:"fps,omitempty"`     // frames per second asked from headsets; chosen on the page
 	Lesson  string     `json:"lesson,omitempty"`  // lesson app typed by the teacher on the page
+	View    string     `json:"view,omitempty"`    // part of the picture headsets send (view.go)
 	Class   int        `json:"class"`             // class chosen on the page
 	Classes []classCfg `json:"classes,omitempty"` // per class: its name and the headsets' names
 }
@@ -113,7 +114,8 @@ func (d *device) sendWant() {
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	// acks: this server confirms every frame, so the headset keeps only a few frames in flight.
 	// fps: headsets before 0.4.6 ignore it and send 10 frames/s.
-	conn.WriteJSON(map[string]any{"type": "want", "on": on, "hq": hq, "acks": true, "fps": currentFPS()})
+	// crop: headsets before 0.4.11 ignore it and send the whole picture.
+	conn.WriteJSON(map[string]any{"type": "want", "on": on, "hq": hq, "acks": true, "fps": currentFPS(), "crop": currentCrop()})
 }
 
 // ack confirms a received frame. Without this, frames piled up in Cloudflare and network
@@ -302,15 +304,7 @@ func handleFPS(w http.ResponseWriter, r *http.Request) {
 		fpsMu.Unlock()
 		if changed {
 			log.Printf("frame rate set to %d fps", n)
-			devices.mu.Lock()
-			list := make([]*device, 0, len(devices.devices))
-			for _, d := range devices.devices {
-				list = append(list, d)
-			}
-			devices.mu.Unlock()
-			for _, d := range list {
-				d.sendWant()
-			}
+			wantAll()
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -562,6 +556,7 @@ func main() {
 	mux.HandleFunc("/api/fps", localOnly(handleFPS))
 	mux.HandleFunc("/api/lesson", localOnly(handleLesson))
 	mux.HandleFunc("/api/classes", localOnly(handleClasses))
+	mux.HandleFunc("/api/view", localOnly(handleViewMode))
 	mux.HandleFunc("/stream/", localOnly(handleStream))
 	mux.HandleFunc("/view/", localOnly(handleView))
 	mux.HandleFunc("/", localOnly(handleIndex))

@@ -56,7 +56,7 @@ const CONFIG = {
   @media (min-width: 1300px) { main { grid-template-columns: repeat(5, 1fr); } }
   .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
           display: flex; flex-direction: column; }
-  .screen { position: relative; aspect-ratio: 1 / 1; background: var(--tile); cursor: zoom-in; }
+  .screen { position: relative; aspect-ratio: 16 / 9; background: var(--tile); cursor: zoom-in; }
   /* absolute: in the expanded view the canvas must not stretch the flex box (top and bottom were cut off) */
   .screen canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
   .screen .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -111,6 +111,9 @@ const CONFIG = {
   <label id="lessonBox" title="App of this lesson, as shown on the tiles. Empty = no check.">Lesson app
     <input id="lessonInput" list="appList" placeholder="type or pick…" autocomplete="off"></label>
   <datalist id="appList"></datalist>
+  <label id="viewBox" title="Part of the picture the headsets send. Narrower = lighter frames, less delay.">View
+    <select id="viewSelect"><option value="full">Full</option><option value="c75">Center 75%</option>
+      <option value="c50">Center 50%</option><option value="left">Left half</option><option value="right">Right half</option></select></label>
   <label id="fpsBox" title="Frames per second asked from every headset (headsets with app 0.4.6+)">FPS
     <select id="fpsSelect"><option>10</option><option>15</option><option>20</option><option>24</option></select></label>
   <label><input type="checkbox" id="recordToggle" checked> Record</label>
@@ -386,7 +389,12 @@ class Tile {
       }
       this.ctx.drawImage(bmp, 0, 0);
       // Recording uses its own canvas with a fixed size, so switching quality does not break the file.
-      if (this.recCanvas) this.recCtx.drawImage(bmp, 0, 0, this.recCanvas.width, this.recCanvas.height);
+      if (this.recCanvas) { // fit the picture into the fixed-size recording, keeping its shape (View can change it)
+        const rw = this.recCanvas.width, rh = this.recCanvas.height, k = Math.min(rw / bmp.width, rh / bmp.height);
+        const dw = Math.round(bmp.width * k), dh = Math.round(bmp.height * k);
+        if (dw !== rw || dh !== rh) { this.recCtx.fillStyle = "#000"; this.recCtx.fillRect(0, 0, rw, rh); }
+        this.recCtx.drawImage(bmp, (rw - dw) >> 1, (rh - dh) >> 1, dw, dh);
+      }
       bmp.close();
       this.overlay.textContent = "";
       // Real frame rate as seen on this laptop.
@@ -767,6 +775,11 @@ window.addEventListener("beforeunload", (e) => {
     $("lessonInput").onkeydown = (e) => { if (e.key === "Enter") $("lessonInput").blur(); };
     await classesCall("");
     $("classSelect").onchange = () => classesCall(`current=${$("classSelect").value}`);
+    try { $("viewSelect").value = (await (await fetch("/api/view", { cache: "no-store" })).json()).view || "full"; } catch {}
+    $("viewSelect").onchange = async () => {
+      try { await fetch(`/api/view?view=${$("viewSelect").value}`, { method: "POST" }); }
+      catch { warn("Cannot change the view: server program is not running."); }
+    };
     $("openClassList").onclick = openClassList;
     $("clStudents").oninput = refreshClassList;
     $("clCancel").onclick = () => $("classList").close();
@@ -776,7 +789,7 @@ window.addEventListener("beforeunload", (e) => {
       if (n && n.trim()) classesCall(`rename=${classes.current}&name=${encodeURIComponent(n.trim())}`);
     };
   } else {
-    for (const id of ["fpsBox", "lessonBox", "classBox", "renameClass", "openClassList"]) $(id).style.display = "none";
+    for (const id of ["fpsBox", "viewBox", "lessonBox", "classBox", "renameClass", "openClassList"]) $(id).style.display = "none";
   }
   folder = (await kvGet("folder")) || null;
   showFolder();

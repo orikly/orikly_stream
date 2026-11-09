@@ -10,6 +10,11 @@ object StreamState {
     @Volatile var targetFps = TARGET_FPS
     /** Высокое качество — для разворота одних очков на весь экран (?hq=1). Качество JPEG — в лестницах ниже. */
     const val HQ_HEIGHT = 960
+    /** Захват в 16:9: система Quest сообщает размер экрана 500×800 (окно панели), а не реальный вид. */
+    const val CAPTURE_WIDTH = 1706
+    /** Какую часть кадра по ширине слать (0..1): ноутбук выбирает «View» — меньше ширина, легче кадр. */
+    @Volatile var cropLeft = 0f
+    @Volatile var cropRight = 1f
     const val MAX_STREAM_CLIENTS = 4
 
     enum class Status { IDLE, RUNNING, STOPPED, ERROR }

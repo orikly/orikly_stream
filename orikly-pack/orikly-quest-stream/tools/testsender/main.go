@@ -31,7 +31,76 @@ var (
 	addr    = flag.String("url", "wss://stream.orikly.org/push", "server address (ws://127.0.0.1:8090/push = without the tunnel)")
 	keyFlag = flag.String("key", "", "access key (default: from orikly-server.json next to this program)")
 	quality = flag.Int("q", 60, "JPEG quality")
+	// Load test: several fake headsets with a fixed total traffic, sending without waiting for Start.
+	count   = flag.Int("count", 1, "load test: number of fake headsets")
+	mbit    = flag.Float64("mbit", 0, "load test: total traffic in Mbit/s (e.g. 14); 0 = normal mode (like one headset, waits for Start)")
+	loadFps = flag.Int("fps", 24, "load test: frames per second per fake headset")
 )
+
+// Load test: prepared frames (a real JPEG padded to the needed size) and shared statistics.
+var (
+	loadFrames [][]byte
+	agg        struct {
+		sync.Mutex
+		bytes, frames, waited, conns int
+		rtts                         []time.Duration
+	}
+)
+
+func loadMode() bool { return *mbit > 0 }
+
+func prepareLoadFrames() {
+	size := int(*mbit * 1e6 / 8 / float64(*count) / float64(*loadFps))
+	for i := 0; i < 24; i++ {
+		jp := picture(854, 480, i*5)
+		for q := *quality - 5; len(jp) > size && q >= 5; q -= 5 { // too heavy for the asked traffic: lower JPEG quality
+			jp = pictureQ(854, 480, i*5, q)
+		}
+		if len(jp) > size {
+			jp = jp[:size] // still too big: a cut picture is fine for a traffic test
+		}
+		if len(jp) < size { // bytes after the end of a JPEG are ignored by decoders
+			jp = append(jp, make([]byte, size-len(jp))...)
+		}
+		loadFrames = append(loadFrames, jp)
+	}
+	fmt.Printf("Load test: %d fake headsets x %d fps x %d KB = %.1f Mbit/s in total\n",
+		*count, *loadFps, len(loadFrames[0])/1024, float64(len(loadFrames[0])*8**loadFps**count)/1e6)
+}
+
+func loadReport() {
+	start := time.Now()
+	last := start
+	for range time.Tick(2 * time.Second) {
+		now := time.Now()
+		agg.Lock()
+		var sum, max time.Duration
+		for _, r := range agg.rtts {
+			sum += r
+			if r > max {
+				max = r
+			}
+		}
+		avg := time.Duration(0)
+		if len(agg.rtts) > 0 {
+			avg = sum / time.Duration(len(agg.rtts))
+		}
+		sec := now.Sub(last).Seconds()
+		fmt.Printf("%s  connected %d/%d, sent %.2f Mbit/s, %.1f fps per headset, round trip avg %d ms max %d ms, waited for acks %d times\n",
+			now.Format("15:04:05"), agg.conns, *count, float64(agg.bytes)*8/sec/1e6,
+			float64(agg.frames)/sec/float64(max1(agg.conns)), avg.Milliseconds(), max.Milliseconds(), agg.waited)
+		agg.bytes, agg.frames, agg.waited, agg.rtts = 0, 0, 0, agg.rtts[:0]
+		agg.Unlock()
+		last = now
+	}
+}
+
+func max1(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return n
+}
 
 func loadKey() string {
 	if *keyFlag != "" {
@@ -87,7 +156,9 @@ func text(img *image.RGBA, s string, x0, y0, scale int, c color.RGBA) {
 }
 
 // picture: moving colour bands + light noise (JPEG ~28 KB at 854x480, close to a real headset frame) + clock.
-func picture(w, h, n int) []byte {
+func picture(w, h, n int) []byte { return pictureQ(w, h, n, *quality) }
+
+func pictureQ(w, h, n, q int) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	rnd := rand.New(rand.NewSource(int64(n)))
 	pix := img.Pix
@@ -109,7 +180,7 @@ func picture(w, h, n int) []byte {
 	text(img, fmt.Sprintf("%06d", n), w/20, h/10, scale, color.RGBA{0, 0, 0, 255})
 	text(img, time.Now().Format("15:04:05.0"), w/20, h/10+scale*10, scale, color.RGBA{0, 0, 0, 255})
 	var b bytes.Buffer
-	jpeg.Encode(&b, img, &jpeg.Options{Quality: *quality})
+	jpeg.Encode(&b, img, &jpeg.Options{Quality: q})
 	return b.Bytes()
 }
 
@@ -119,15 +190,25 @@ func main() {
 	host, _ := os.Hostname()
 	u := *addr + "?key=" + url.QueryEscape(key)
 	fmt.Println("Sending a 16:9 test picture to", *addr)
-	for {
-		if err := run(u, host); err != nil {
-			fmt.Println("connection:", err, "— retrying in 3 s")
-		}
-		time.Sleep(3 * time.Second)
+	if loadMode() {
+		prepareLoadFrames()
+		go loadReport()
 	}
+	for i := 1; i <= *count; i++ {
+		go func(i int) {
+			for {
+				if err := run(u, host, i); err != nil {
+					fmt.Printf("fake headset %d: %v — retrying in 3 s\n", i, err)
+				}
+				time.Sleep(3 * time.Second)
+			}
+		}(i)
+		time.Sleep(100 * time.Millisecond)
+	}
+	select {}
 }
 
-func run(u, host string) error {
+func run(u, host string, idx int) error {
 	c, resp, err := websocket.DefaultDialer.Dial(u, nil)
 	if err != nil {
 		if resp != nil {
@@ -143,15 +224,30 @@ func run(u, host string) error {
 		c.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		return c.WriteMessage(t, b)
 	}
-	hello, _ := json.Marshal(map[string]any{"type": "hello", "id": "testsender-" + host, "name": "Test sender 16:9",
+	id, name := "testsender-"+host, "Test sender 16:9"
+	if *count > 1 {
+		id, name = fmt.Sprintf("%s-%d", id, idx), fmt.Sprintf("%s #%d", name, idx)
+	}
+	hello, _ := json.Marshal(map[string]any{"type": "hello", "id": id, "name": name,
 		"model": "test", "version": "test"})
 	if err := send(websocket.TextMessage, hello); err != nil {
 		return err
 	}
-	fmt.Println("connected. Open the page and press Start on the tile \"Test sender 16:9\".")
+	if loadMode() {
+		agg.Lock()
+		agg.conns++
+		agg.Unlock()
+		defer func() { agg.Lock(); agg.conns--; agg.Unlock() }()
+	} else {
+		fmt.Println("connected. Open the page and press Start on the tile \"Test sender 16:9\".")
+	}
 
 	var mu sync.Mutex
-	on, hq, fps := false, false, 15
+	on, hq, fps := loadMode(), false, 15
+	cropW := 1.0
+	if loadMode() {
+		fps = *loadFps
+	}
 	var sentTimes []time.Time
 	type sample struct {
 		at  time.Time
@@ -171,14 +267,21 @@ func run(u, host string) error {
 				Type   string
 				On, Hq bool
 				Fps    int
+				Crop   []float64
 			}
 			json.Unmarshal(m, &w)
 			mu.Lock()
 			switch w.Type {
 			case "want":
-				on, hq = w.On, w.Hq
-				if w.Fps > 0 {
-					fps = w.Fps
+				if !loadMode() { // load test sends all the time at its own rate
+					on, hq = w.On, w.Hq
+					if w.Fps > 0 {
+						fps = w.Fps
+					}
+					cropW = 1
+					if len(w.Crop) == 2 && w.Crop[1] > w.Crop[0] {
+						cropW = w.Crop[1] - w.Crop[0] // like the headset: a narrower picture
+					}
 				}
 			case "ack":
 				if len(sentTimes) > 0 {
@@ -186,6 +289,11 @@ func run(u, host string) error {
 					sentTimes = sentTimes[1:]
 					samples = append(samples, sample{time.Now(), r})
 					winRtt = append(winRtt, r)
+					if loadMode() {
+						agg.Lock()
+						agg.rtts = append(agg.rtts, r)
+						agg.Unlock()
+					}
 				}
 			}
 			mu.Unlock()
@@ -242,7 +350,7 @@ func run(u, host string) error {
 			}
 			lastStatus = now
 		}
-		if now.Sub(lastReport) >= 2*time.Second {
+		if now.Sub(lastReport) >= 2*time.Second && !loadMode() {
 			mu.Lock()
 			var sum, max time.Duration
 			for _, r := range winRtt {
@@ -290,13 +398,26 @@ func run(u, host string) error {
 			w, hh = 1706, 960
 		}
 		mu.Lock()
+		w = int(float64(w)*cropW) &^ 1
+		mu.Unlock()
+		mu.Lock()
 		ok := canSend(time.Now())
 		mu.Unlock()
 		if !ok {
 			waited++ // window full: skip this frame, send the freshest one later (like the headset)
+			if loadMode() {
+				agg.Lock()
+				agg.waited++
+				agg.Unlock()
+			}
 			continue
 		}
-		jp := picture(w, hh, n)
+		var jp []byte
+		if loadMode() {
+			jp = loadFrames[n%len(loadFrames)]
+		} else {
+			jp = picture(w, hh, n)
+		}
 		n++
 		mu.Lock()
 		sentTimes = append(sentTimes, time.Now())
@@ -306,5 +427,11 @@ func run(u, host string) error {
 		}
 		sent++
 		bytesSent += len(jp)
+		if loadMode() {
+			agg.Lock()
+			agg.bytes += len(jp)
+			agg.frames++
+			agg.Unlock()
+		}
 	}
 }

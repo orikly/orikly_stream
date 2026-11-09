@@ -112,8 +112,10 @@ class CaptureService : Service() {
             val srcH = metrics.heightPixels
             // VirtualDisplay сразу масштабирует экран до размера высокого качества;
             // обычное качество получаем из него уменьшением при сжатии.
-            val outH = minOf(StreamState.HQ_HEIGHT, srcH).let { it - it % 2 }
-            val outW = (outH.toLong() * srcW / srcH).toInt().let { it - it % 2 }
+            // Захват всегда 16:9 (1706×960): размер экрана, который сообщает система (500×800), — это окно
+            // панели, и картинка в нём выходила узкой. Обычное качество — уменьшением при сжатии.
+            val outH = StreamState.HQ_HEIGHT
+            val outW = StreamState.CAPTURE_WIDTH
             StreamState.sourceWidth = srcW
             StreamState.sourceHeight = srcH
             StreamState.captureWidth = outW
@@ -231,13 +233,19 @@ class CaptureService : Service() {
         val hq = StreamState.hqWanted()
         val ladder = if (hq) StreamState.HQ_LADDER else StreamState.NORMAL_LADDER
         val (targetH, quality) = ladder[StreamState.relayLevel.coerceIn(0, ladder.size - 1)]
-        val out = if (frame.height <= targetH) frame else {
-            val h = targetH
-            val w = (h.toLong() * frame.width / frame.height).toInt().let { it - it % 2 }
+        // Обрезка по ширине («View» на странице): шлём только выбранную часть — кадр уже и легче.
+        val l = StreamState.cropLeft.coerceIn(0f, 0.9f)
+        val r = StreamState.cropRight.coerceIn(l + 0.1f, 1f)
+        val x0 = (frame.width * l).toInt()
+        val x1 = (frame.width * r).toInt()
+        val full = x0 == 0 && x1 >= frame.width
+        val out = if (full && frame.height <= targetH) frame else {
+            val h = minOf(targetH, frame.height)
+            val w = ((x1 - x0).toLong() * h / frame.height).toInt().coerceAtLeast(2).let { it - it % 2 }
             val dst = smallBitmap?.takeIf { it.width == w && it.height == h }
                 ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { smallBitmap = it }
             android.graphics.Canvas(dst).drawBitmap(
-                frame, null, android.graphics.Rect(0, 0, w, h), scalePaint
+                frame, android.graphics.Rect(x0, 0, x1, frame.height), android.graphics.Rect(0, 0, w, h), scalePaint
             )
             dst
         }
