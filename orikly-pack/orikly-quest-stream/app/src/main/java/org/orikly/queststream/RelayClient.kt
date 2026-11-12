@@ -19,11 +19,16 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
- * Отправка картинки на сервер ноутбука через интернет (WebSocket к Cloudflare Tunnel).
- * Очки сами подключаются и держат соединение; кадры шлют, только когда сервер просит ("want").
+ * Отправка видео на сервер (WebSocket к Cloudflare Tunnel). Очки сами подключаются и держат соединение;
+ * кадры шлют, только когда сервер просит ("want").
  *
- * Протокол: очки → сервер: text {"type":"hello"|"status",...}, binary = JPEG.
- *           сервер → очки: text {"type":"want","on":bool,"hq":bool}.
+ * Протокол: очки → сервер: text {"type":"hello","codec":"h264",...} / {"type":"status",...};
+ *           binary = 1 байт типа (1 — ключевой кадр, с настройками видео; 2 — обычный) + кадр H.264 (Annex B).
+ *           сервер → очки: {"type":"want","on","hq","fps","acks","key"} и {"type":"ack"} на каждый кадр.
+ *
+ * Кадры H.264 зависят друг от друга: выбросить один — картинка «рассыплется» до следующего ключевого.
+ * Поэтому при плохом канале очки сначала снижают битрейт; если кадры всё же пришлось выбросить,
+ * они сразу просят у кодировщика ключевой кадр и шлют уже с него.
  */
 class RelayClient(private val ctx: Context, url: String, key: String) {
 
@@ -37,13 +42,16 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
     @Volatile private var running = false
     @Volatile private var socket: WebSocket? = null
 
-    // Подтверждения от ноутбука: в пути не больше MAX_IN_FLIGHT кадров. Без этого при узком интернете
-    // ноутбука кадры копились в Cloudflare и сетевых буферах, и задержка росла до 5–7 с.
+    // Подтверждения от ноутбука: сколько кадров в пути. Без этого при узком канале кадры копились
+    // в Cloudflare и сетевых буферах, и задержка росла до секунд.
     @Volatile private var acksEnabled = false
     private val inFlight = AtomicInteger(0)
     private val sentTimes = ConcurrentLinkedQueue<Long>()
     @Volatile private var lastAckAt = 0L
     private var loop: Thread? = null
+
+    // Отклики за последние RTT_WINDOW_MS: самый маленький — «чистое» время пути без очереди.
+    private val rttSamples = ArrayDeque<Pair<Long, Long>>()
 
     fun start() {
         running = true
@@ -62,9 +70,17 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
         socket = null
         loop?.interrupt()
         loop = null
-        StreamState.relayWant = false
-        StreamState.relayHq = false
+        setWant(on = false, hq = false, fps = StreamState.TARGET_FPS)
         StreamState.relayState = "off"
+    }
+
+    /** Что просит ноутбук: при изменении включаем / пересобираем кодировщик. */
+    private fun setWant(on: Boolean, hq: Boolean, fps: Int) {
+        val changed = on != StreamState.relayWant || hq != StreamState.relayHq || fps != StreamState.targetFps
+        StreamState.relayWant = on
+        StreamState.relayHq = hq
+        StreamState.targetFps = fps
+        if (changed) StreamState.onEncoderChange?.invoke()
     }
 
     private fun run() {
@@ -83,33 +99,28 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     runCatching {
                         val msg = JSONObject(text)
-                        if (msg.optString("type") == "ack") {
-                            val now = SystemClock.elapsedRealtime()
-                            lastAckAt = now
-                            if (inFlight.decrementAndGet() < 0) inFlight.set(0)
-                            sentTimes.poll()?.let { sentAt ->
-                                val rtt = now - sentAt
-                                StreamState.relayRttMs = (StreamState.relayRttMs * 3 + rtt) / 4
-                                noteRtt(now, rtt)
+                        when (msg.optString("type")) {
+                            "ack" -> {
+                                val now = SystemClock.elapsedRealtime()
+                                lastAckAt = now
+                                if (inFlight.decrementAndGet() < 0) inFlight.set(0)
+                                sentTimes.poll()?.let { sentAt ->
+                                    val rtt = now - sentAt
+                                    StreamState.relayRttMs = (StreamState.relayRttMs * 3 + rtt) / 4
+                                    noteRtt(now, rtt)
+                                }
                             }
-                        } else if (msg.optString("type") == "want") {
-                            acksEnabled = msg.optBoolean("acks") // сервер старее v0.3.3 подтверждений не шлёт
-                            val on = msg.optBoolean("on")
-                            StreamState.relayHq = msg.optBoolean("hq")
-                            // "crop": [левый край, правый край] по ширине, 0..1 (сервер старее 0.4.11 не присылает — весь кадр)
-                            val crop = msg.optJSONArray("crop")
-                            val newL = crop?.optDouble(0, 0.0)?.toFloat() ?: 0f
-                            val newR = crop?.optDouble(1, 1.0)?.toFloat() ?: 1f
-                            val cropChanged = newL != StreamState.cropLeft || newR != StreamState.cropRight
-                            StreamState.cropLeft = newL
-                            StreamState.cropRight = newR
-                            val fps = msg.optInt("fps", 0) // сервер старее 0.4.6 частоту не присылает
-                            StreamState.targetFps =
-                                if (fps > 0) fps.coerceIn(1, StreamState.MAX_FPS) else StreamState.TARGET_FPS
-                            val wasOn = StreamState.relayWant
-                            StreamState.relayWant = on
-                            if (on && !wasOn) StreamState.requestFrames(0)
-                            else if (on || cropChanged) StreamState.onFrameWanted?.invoke() // качество/обрезка сменились — свежий кадр сразу
+                            "want" -> {
+                                acksEnabled = msg.optBoolean("acks")
+                                val fps = msg.optInt("fps", 0)
+                                setWant(
+                                    on = msg.optBoolean("on"),
+                                    hq = msg.optBoolean("hq"),
+                                    fps = if (fps > 0) fps.coerceIn(1, StreamState.MAX_FPS) else StreamState.TARGET_FPS,
+                                )
+                                // Новый зритель: ему нужен ключевой кадр, чтобы начать показ.
+                                if (msg.optBoolean("key")) StreamState.onKeyFrameRequest?.invoke()
+                            }
                         }
                     }
                 }
@@ -145,10 +156,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             }
 
             socket = null
-            StreamState.targetFps = StreamState.TARGET_FPS
-            StreamState.relayWant = false
-            StreamState.relayHq = false
-            StreamState.relayLevel = 0
+            setWant(on = false, hq = false, fps = StreamState.TARGET_FPS)
             if (!running) break
             StreamState.relayState = "reconnecting"
             Thread.sleep(backoff)
@@ -156,109 +164,113 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
         }
     }
 
-    /** Пока соединение живо: статус раз в 10 с, кадры — когда сервер просит. */
+    /** Пока соединение живо: статус раз в 2/10 с, кадры — по порядку, когда сервер просит. */
     private fun pump(ws: WebSocket, closed: CountDownLatch) {
-        var lastSeq = StreamState.latest().first
         var lastStatus = 0L
         var sent = 0
         var dropped = 0
         var windowStart = SystemClock.elapsedRealtime()
         var calmSince = windowStart
-        var waitingSeq = -1L
+        var waitKey = true // начинаем всегда с ключевого кадра
         var lastSentAt = windowStart
         lastAckAt = windowStart
-        StreamState.relayLevel = 0
         while (running && closed.count > 0) {
             val now = SystemClock.elapsedRealtime()
             if (now - windowStart >= 2000) {
-                adapt(sent, dropped, now, calmSince).let { if (it) calmSince = now }
+                if (adaptBitrate(dropped, now, calmSince)) calmSince = now
                 StreamState.relaySentFps = sent * 1000.0 / (now - windowStart)
                 sent = 0; dropped = 0; windowStart = now
             }
-            // Пока идёт картинка — статус чаще, чтобы на ноутбуке было видно задержку канала.
             if (now - lastStatus >= if (StreamState.relayWant) 2000 else 10_000) {
                 ws.send(statusJson())
                 lastStatus = now
             }
             if (!StreamState.relayWant) {
+                StreamState.clearFrames()
+                waitKey = true
                 Thread.sleep(200)
                 continue
             }
-            val (seq, jpeg) = StreamState.awaitNewer(lastSeq, 500)
-            if (jpeg == null || seq == lastSeq) continue
-            if (acksEnabled && !canSend(now)) {
-                if (now - lastAckAt > ACK_STUCK_MS && now - lastSentAt > ACK_STUCK_MS) {
+            val frame = StreamState.take(200) ?: continue
+            if (waitKey && !frame.key) continue // без ключевого кадра браузеру не с чего начать
+            waitKey = false
+
+            // Окно подтверждений занято — ждём, но не дольше MAX_LAG_MS: иначе задержка копится.
+            var tooLate = false
+            while (acksEnabled && !canSend(SystemClock.elapsedRealtime()) && running && closed.count > 0) {
+                val t = SystemClock.elapsedRealtime()
+                if (t - lastAckAt > ACK_STUCK_MS && t - lastSentAt > ACK_STUCK_MS) {
                     inFlight.set(0); sentTimes.clear() // подтверждения потерялись — не зависаем навсегда
-                } else {
-                    // Окно занято: этот кадр не шлём сейчас, а отправим самый свежий, как только придёт подтверждение.
-                    if (seq != waitingSeq) { dropped++; waitingSeq = seq }
-                    Thread.sleep(5)
-                    continue
+                    break
                 }
+                if (t - frame.atMs > MAX_LAG_MS) { tooLate = true; break }
+                Thread.sleep(3)
             }
-            lastSeq = seq
-            // Не копим очередь и у себя: если прошлый кадр ещё не ушёл из очков, этот выбрасываем.
-            if (ws.queueSize() > maxOf(MIN_BACKLOG_BYTES, jpeg.size.toLong())) {
-                dropped++
-            } else {
-                if (acksEnabled) {
-                    inFlight.incrementAndGet()
-                    sentTimes.add(now)
-                }
-                ws.send(jpeg.toByteString())
-                lastSentAt = now
-                sent++
+            if (tooLate || ws.queueSize() > MAX_BACKLOG_BYTES) {
+                // Канал не успевает: выбрасываем накопленное и начинаем с нового ключевого кадра.
+                dropped += 1
+                StreamState.clearFrames()
+                waitKey = true
+                StreamState.onKeyFrameRequest?.invoke()
+                continue
             }
+            val t = SystemClock.elapsedRealtime()
+            if (acksEnabled) {
+                inFlight.incrementAndGet()
+                sentTimes.add(t)
+            }
+            val msg = ByteArray(frame.data.size + 1)
+            msg[0] = if (frame.key) 1 else 2
+            System.arraycopy(frame.data, 0, msg, 1, frame.data.size)
+            ws.send(msg.toByteString())
+            lastSentAt = t
+            sent++
         }
     }
-
-    // Отклики за последние RTT_WINDOW_MS: самый маленький — это «чистое» время пути без очереди.
-    private val rttSamples = ArrayDeque<Pair<Long, Long>>()
 
     private fun noteRtt(now: Long, rtt: Long) = synchronized(rttSamples) {
         rttSamples.addLast(now to rtt)
         while (rttSamples.isNotEmpty() && now - rttSamples.first().first > RTT_WINDOW_MS) rttSamples.removeFirst()
     }
 
+    private fun minRtt(now: Long): Long? = synchronized(rttSamples) {
+        while (rttSamples.isNotEmpty() && now - rttSamples.first().first > RTT_WINDOW_MS) rttSamples.removeFirst()
+        rttSamples.minOfOrNull { it.second }
+    }
+
     /**
-     * Можно ли отправить ещё кадр, пока не пришли подтверждения прошлых.
-     * Чтобы шло N кадров/с при отклике канала R, в пути должно быть около N × R кадров: при окне в 3 кадра
-     * и отклике 300 мс выходило не больше 10 кадров/с, при 1 с — 3 кадра/с.
-     * Поэтому: до MIN_IN_FLIGHT кадров — всегда (как раньше); больше (до MAX_IN_FLIGHT) — только если самый
-     * старый неподтверждённый кадр в пути не дольше «чистого» отклика + QUEUE_SLACK_MS. «Чистый» — самый
-     * маленький за RTT_WINDOW_MS, без очереди. Если канал забился и кадры встали в очередь, лишние кадры
-     * не шлются: задержка не копится, а самый свежий кадр уходит, как только освободится место.
+     * Можно ли отправить ещё кадр, пока не пришли подтверждения прошлых. До MIN_IN_FLIGHT кадров — всегда;
+     * больше (до MAX_IN_FLIGHT) — только если самый старый неподтверждённый кадр в пути не дольше «чистого»
+     * отклика + QUEUE_SLACK_MS (в канале нет очереди).
      */
     private fun canSend(now: Long): Boolean {
         val n = inFlight.get()
         if (n < MIN_IN_FLIGHT) return true
         if (n >= MAX_IN_FLIGHT) return false
-        val minRtt = synchronized(rttSamples) {
-            while (rttSamples.isNotEmpty() && now - rttSamples.first().first > RTT_WINDOW_MS) rttSamples.removeFirst()
-            rttSamples.minOfOrNull { it.second }
-        } ?: return false
+        val min = minRtt(now) ?: return false
         val oldest = sentTimes.peek() ?: return true
-        return now - oldest < minRtt + QUEUE_SLACK_MS
+        return now - oldest < min + QUEUE_SLACK_MS
     }
 
     /**
-     * Держим заданную частоту кадров: если за 2 с выброшено >10% кадров — ступень качества ниже;
-     * если 6 с без потерь — ступень выше. Возвращает true, если ступень сменилась.
+     * Битрейт под канал (частота кадров та же): кадры выбрасывались или отклик вырос заметно выше
+     * «чистого» — битрейт ×0.75 (не ниже 30%); 6 с спокойно — ×1.15 (до 100%). true — если поменялся.
      */
-    private fun adapt(sent: Int, dropped: Int, now: Long, calmSince: Long): Boolean {
-        val total = sent + dropped
-        val max = StreamState.NORMAL_LADDER.size - 1
-        val level = StreamState.relayLevel
-        if (total > 0 && dropped * 10 > total && level < max) {
-            StreamState.relayLevel = level + 1
-            Log.i(TAG, "network slow: quality level ${level + 1}")
-            return true
+    private fun adaptBitrate(dropped: Int, now: Long, calmSince: Long): Boolean {
+        val min = minRtt(now)
+        val congested = dropped > 0 || (min != null && StreamState.relayRttMs > min * 2 + 150)
+        val old = StreamState.bitrateScale
+        val new = when {
+            congested -> maxOf(MIN_BITRATE_SCALE, old * 0.75)
+            now - calmSince >= 6000 -> minOf(1.0, old * 1.15)
+            else -> old
         }
-        if (dropped == 0 && now - calmSince >= 6000 && level > 0) {
-            StreamState.relayLevel = level - 1
-            return true
+        if (new != old) {
+            StreamState.bitrateScale = new
+            StreamState.onBitrateChange?.invoke()
+            if (congested) Log.i(TAG, "network slow: bitrate ${StreamState.currentBitrate()} bps")
         }
-        return dropped > 0
+        return congested || new != old
     }
 
     private fun helloJson() = JSONObject()
@@ -267,6 +279,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
         .put("name", DeviceInfo.name(ctx))
         .put("model", Build.MODEL)
         .put("version", BuildConfig.VERSION_NAME)
+        .put("codec", "h264")
         .toString()
 
     private fun statusJson(): String {
@@ -274,20 +287,21 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
         return JSONObject()
             .put("type", "status")
             .put("capturing", st.status == StreamState.Status.RUNNING)
-            .put("fps", st.fps)
+            .put("codec", "h264")
+            .put("fps", st.encFps)
             .put("targetFps", st.targetFps)
-            .put("crop", "${st.cropLeft}-${st.cropRight}")
             .put("sentFps", st.relaySentFps)
-            .put("level", st.relayLevel)
             .put("rtt", st.relayRttMs)
-            .put("output", "${st.outWidth}x${st.outHeight}")
+            .put("bitrate", st.currentBitrate())
+            .put("bitrateScale", Math.round(st.bitrateScale * 100))
+            .put("level", if (st.bitrateScale < 0.99) 1 else 0) // для старой страницы: «качество снижено»
+            .put("output", "${st.encWidth}x${st.encHeight}")
+            .put("capture", "${st.encWidth}x${st.encHeight}")
             .put("source", "${st.sourceWidth}x${st.sourceHeight}")
-            // диагностика: частота кадров от системы, размер захвата, частота экрана, версия Horizon OS
-            .put("sysFps", Math.round(st.systemFps * 10) / 10.0)
-            .put("capture", "${st.captureWidth}x${st.captureHeight}")
+            .put("sysFps", Math.round(st.encFps * 10) / 10.0)
             .put("hz", Math.round(st.displayHz))
             .put("os", Build.DISPLAY)
-            // приложение ученика и серийник (все непустые ответы)
+            .put("encoder", st.encoderName)
             .put("usageAccess", AppWatcher.hasAccess)
             .put("app", AppWatcher.label ?: JSONObject.NULL)
             .put("appPkg", AppWatcher.pkg ?: JSONObject.NULL)
@@ -302,11 +316,14 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
 
     companion object {
         private const val TAG = "OriklyRelay"
-        private const val MIN_BACKLOG_BYTES = 32L * 1024
         private const val MIN_IN_FLIGHT = 3
-        private const val MAX_IN_FLIGHT = 8
+        private const val MAX_IN_FLIGHT = 16
         private const val RTT_WINDOW_MS = 30_000L
         private const val QUEUE_SLACK_MS = 60L
         private const val ACK_STUCK_MS = 5000L
+        /** Кадр старше этого не шлём (вместе с накопленными) — начинаем с нового ключевого. */
+        private const val MAX_LAG_MS = 700L
+        private const val MAX_BACKLOG_BYTES = 256L * 1024
+        private const val MIN_BITRATE_SCALE = 0.3
     }
 }

@@ -1,21 +1,24 @@
 package org.orikly.queststream
 
-/** Общее состояние между сервисом, HTTP-сервером и экраном приложения. */
+/** Общее состояние между сервисом захвата, связью с сервером и экраном приложения. */
 object StreamState {
-    const val PORT = 8080
-    const val TARGET_HEIGHT = 360
     /** Частота по умолчанию; ноутбук может попросить другую (поле "fps" в "want"), не больше MAX_FPS. */
     const val TARGET_FPS = 15
     const val MAX_FPS = 30
     @Volatile var targetFps = TARGET_FPS
-    /** Высокое качество — для разворота одних очков на весь экран (?hq=1). Качество JPEG — в лестницах ниже. */
-    const val HQ_HEIGHT = 960
-    /** Захват в 16:9: система Quest сообщает размер экрана 500×800 (окно панели), а не реальный вид. */
-    const val CAPTURE_WIDTH = 1706
-    /** Какую часть кадра по ширине слать (0..1): ноутбук выбирает «View» — меньше ширина, легче кадр. */
-    @Volatile var cropLeft = 0f
-    @Volatile var cropRight = 1f
-    const val MAX_STREAM_CLIENTS = 4
+
+    /**
+     * Видео H.264 (с 0.5.0): аппаратный кодировщик очков. Сетка — 640×360, 0,5 Мбит/с;
+     * развёрнутые очки — 1280×720, 2,5 Мбит/с (решения Paul). Битрейт ровный в любом приложении.
+     */
+    const val GRID_WIDTH = 640
+    const val GRID_HEIGHT = 360
+    const val GRID_BITRATE = 500_000
+    const val HQ_WIDTH = 1280
+    const val HQ_HEIGHT = 720
+    const val HQ_BITRATE = 2_500_000
+    /** Ключевой кадр (полная картинка) не реже, чем раз в столько секунд. */
+    const val KEY_INTERVAL_S = 2
 
     enum class Status { IDLE, RUNNING, STOPPED, ERROR }
 
@@ -23,81 +26,49 @@ object StreamState {
     @Volatile var errorText: String? = null
     @Volatile var sourceWidth = 0
     @Volatile var sourceHeight = 0
-    @Volatile var outWidth = 0
-    @Volatile var outHeight = 0
-    @Volatile var fps = 0.0
-
-    /**
-     * Диагностика: сколько кадров в секунду отдаёт сама система (вызовы onImage), до нашего отбора 10 кадров/с.
-     * Если здесь ~1 — кадров не даёт сама система Quest; если ~10+, а до ноутбука доходит меньше — теряются в пути.
-     */
-    @Volatile var systemFrames = 0L
-    @Volatile var systemFps = 0.0
-    @Volatile var captureWidth = 0
-    @Volatile var captureHeight = 0
+    @Volatile var encWidth = 0
+    @Volatile var encHeight = 0
+    /** Сколько кадров в секунду выдаёт кодировщик (до отправки). */
+    @Volatile var encFps = 0.0
     @Volatile var displayHz = 0f
-    @Volatile var streamClients = 0
-    @Volatile var hqClients = 0
+    @Volatile var encoderName = ""
 
-    /** Сервер ноутбука (через интернет) просит картинку / высокое качество. */
+    /** Сервер ноутбука просит картинку / высокое качество. */
     @Volatile var relayWant = false
     @Volatile var relayHq = false
     @Volatile var relayState = "off"
-
-    fun hqWanted() = hqClients > 0 || relayHq
-
-    /**
-     * Ступени качества при передаче через интернет: частота кадров важнее качества.
-     * Если канал не успевает, RelayClient сдвигает ступень вниз (хуже, но 10 кадров/с), потом обратно.
-     * Пары: высота кадра, качество JPEG.
-     */
-    // Решение Paul (0.4.10): качество постоянное, без снижения — по одной ступени.
-    // Прежние лестницы (вернуть, если канала не хватает):
-    //   обычная 480/60 480/50 480/40 400/40 360/35 300/30; разворот 960/80 840/70 720/65 600/60 480/55 400/45.
-    val NORMAL_LADDER = listOf(360 to 60) // решение Paul (0.4.12): сетка 360p — легче кадры
-    val HQ_LADDER = listOf(960 to 80)
-    @Volatile var relayLevel = 0
     @Volatile var relaySentFps = 0.0
     /** Время «кадр ушёл → ноутбук подтвердил», мс. Растёт — значит, канал на пределе. */
     @Volatile var relayRttMs = 0L
 
-    /** Пока никто не смотрит, JPEG не сжимаем: захват держим, нагрузки почти нет. */
-    @Volatile var encodeUntil = 0L
-    @Volatile var onFrameWanted: (() -> Unit)? = null
+    /** Доля битрейта (0.3..1): при плохом канале очки сами снижают битрейт, частота кадров та же. */
+    @Volatile var bitrateScale = 1.0
+    fun baseBitrate() = if (relayHq) HQ_BITRATE else GRID_BITRATE
+    fun currentBitrate() = (baseBitrate() * bitrateScale).toInt()
 
-    fun wantsFrames(now: Long) = streamClients > 0 || relayWant || now < encodeUntil
+    /** Сервис захвата подписывается: пересобрать кодировщик (размер/частота/вкл-выкл), ключевой кадр, битрейт. */
+    @Volatile var onEncoderChange: (() -> Unit)? = null
+    @Volatile var onKeyFrameRequest: (() -> Unit)? = null
+    @Volatile var onBitrateChange: (() -> Unit)? = null
 
-    /** Просит свежий кадр прямо сейчас (даже если экран статичен и система кадров не шлёт). */
-    fun requestFrames(forMs: Long) {
-        encodeUntil = maxOf(encodeUntil, android.os.SystemClock.elapsedRealtime() + forMs)
-        onFrameWanted?.invoke()
-    }
+    /** Один закодированный кадр. Ключевой содержит в начале настройки видео (SPS/PPS) — с него можно начать показ. */
+    class Frame(val key: Boolean, val data: ByteArray, val atMs: Long)
 
     private val lock = Object()
-    private var frame: ByteArray? = null
-    private var seq = 0L
+    private val frames = ArrayDeque<Frame>()
 
-    fun publish(jpeg: ByteArray) = synchronized(lock) {
-        frame = jpeg
-        seq++
+    fun publish(f: Frame) = synchronized(lock) {
+        // Отправка не успевает совсем (кадры не забирают): не копим, начнём заново с ключевого.
+        if (frames.size >= 120) frames.clear()
+        frames.addLast(f)
         lock.notifyAll()
     }
 
-    fun latest(): Pair<Long, ByteArray?> = synchronized(lock) { seq to frame }
-
-    /** Ждёт кадр новее [afterSeq] не дольше [timeoutMs]; по таймауту отдаёт последний. */
-    fun awaitNewer(afterSeq: Long, timeoutMs: Long): Pair<Long, ByteArray?> = synchronized(lock) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (seq <= afterSeq) {
-            val left = deadline - System.currentTimeMillis()
-            if (left <= 0) break
-            lock.wait(left)
-        }
-        seq to frame
+    /** Следующий кадр по порядку; ждёт не дольше [timeoutMs]. */
+    fun take(timeoutMs: Long): Frame? = synchronized(lock) {
+        if (frames.isEmpty()) lock.wait(timeoutMs)
+        frames.removeFirstOrNull()
     }
 
-    fun clearFrame() = synchronized(lock) {
-        frame = null
-        lock.notifyAll()
-    }
+    fun clearFrames() = synchronized(lock) { frames.clear() }
 }

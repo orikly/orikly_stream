@@ -38,7 +38,6 @@ type config struct {
 	Port    int        `json:"port"`
 	FPS     int        `json:"fps,omitempty"`     // frames per second asked from headsets; chosen on the page
 	Lesson  string     `json:"lesson,omitempty"`  // lesson app typed by the teacher on the page
-	View    string     `json:"view,omitempty"`    // part of the picture headsets send (view.go)
 	Class   int        `json:"class"`             // class chosen on the page
 	Classes []classCfg `json:"classes,omitempty"` // per class: its name and the headsets' names
 }
@@ -60,19 +59,24 @@ type device struct {
 	id   string // unique per headset; names can repeat (often just "Quest 3")
 	name string
 
-	mu        sync.Mutex
-	conn      *websocket.Conn
-	writeMu   sync.Mutex
-	frame     []byte
-	seq       uint64
-	newFrame  chan struct{} // closed and replaced on every frame
-	viewers   int
-	hqViewers int
-	model     string
-	version   string
-	status    json.RawMessage
-	lastSeen  time.Time
-	net       netCounters
+	mu         sync.Mutex
+	conn       *websocket.Conn
+	writeMu    sync.Mutex
+	frame      []byte
+	seq        uint64
+	newFrame   chan struct{} // closed and replaced on every frame
+	viewers    int
+	hqViewers  int
+	model      string
+	version    string
+	status     json.RawMessage
+	lastSeen   time.Time
+	codec      string // "h264" (app 0.5.0+) or "" (JPEG)
+	gop        [][]byte
+	gopSize    int
+	subs       map[*subscriber]struct{}
+	lastKeyAsk time.Time
+	net        netCounters
 }
 
 type hub struct {
@@ -102,7 +106,10 @@ func (h *hub) get(id string, create bool) *device {
 }
 
 // sendWant tells the headset whether to send frames and in which quality.
-func (d *device) sendWant() {
+func (d *device) sendWant() { d.sendWantKey(false) }
+
+// sendWantKey: key = also ask an H.264 headset for a key frame (a new viewer needs one to start).
+func (d *device) sendWantKey(key bool) {
 	d.mu.Lock()
 	conn, on, hq := d.conn, d.viewers > 0, d.hqViewers > 0
 	d.mu.Unlock()
@@ -115,7 +122,7 @@ func (d *device) sendWant() {
 	// acks: this server confirms every frame, so the headset keeps only a few frames in flight.
 	// fps: headsets before 0.4.6 ignore it and send 10 frames/s.
 	// crop: headsets before 0.4.11 ignore it and send the whole picture.
-	conn.WriteJSON(map[string]any{"type": "want", "on": on, "hq": hq, "acks": true, "fps": currentFPS(), "crop": currentCrop()})
+	conn.WriteJSON(map[string]any{"type": "want", "on": on, "hq": hq, "acks": true, "fps": currentFPS(), "key": key})
 }
 
 // ack confirms a received frame. Without this, frames piled up in Cloudflare and network
@@ -151,7 +158,7 @@ func handlePush(w http.ResponseWriter, r *http.Request) {
 	// First message must be hello with the headset name.
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	var hello struct {
-		Type, ID, Name, Model, Version string
+		Type, ID, Name, Model, Version, Codec string
 	}
 	if _, msg, err := conn.ReadMessage(); err != nil || json.Unmarshal(msg, &hello) != nil ||
 		hello.Type != "hello" || strings.TrimSpace(hello.Name) == "" {
@@ -168,13 +175,18 @@ func handlePush(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	old := d.conn
 	d.conn = conn
-	d.name, d.model, d.version = name, hello.Model, hello.Version
+	d.name, d.model, d.version, d.codec = name, hello.Model, hello.Version, hello.Codec
+	d.gop, d.gopSize = nil, 0
 	d.lastSeen = time.Now()
 	d.mu.Unlock()
 	if old != nil {
 		old.Close() // same headset reconnected
 	}
-	log.Printf("connected: %s [%s] (%s, app %s) from %s", name, shortID(id), hello.Model, hello.Version, clientIP(r))
+	codecName := "JPEG"
+	if hello.Codec != "" {
+		codecName = strings.ToUpper(hello.Codec)
+	}
+	log.Printf("connected: %s [%s] (%s, app %s, %s) from %s", name, shortID(id), hello.Model, hello.Version, codecName, clientIP(r))
 	d.sendWant()
 
 	// Ping/pong is answered by the headset's WebSocket library; we only need data or pings to arrive.
@@ -196,6 +208,9 @@ func handlePush(w http.ResponseWriter, r *http.Request) {
 			d.frame = msg
 			d.seq++
 			d.onFrame(len(msg))
+			if d.codec == "h264" {
+				d.onH264Frame(msg)
+			}
 			close(d.newFrame)
 			d.newFrame = make(chan struct{})
 			d.mu.Unlock()
@@ -259,6 +274,7 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 		Version string          `json:"version"`
 		Viewers int             `json:"viewers"`
 		Status  json.RawMessage `json:"status,omitempty"`
+		Codec   string          `json:"codec,omitempty"`      // "h264" or "" (JPEG)
 		Lesson  string          `json:"lesson,omitempty"`     // "", noinfo, ok, left
 		Left    string          `json:"lessonText,omitempty"` // where the headset is instead
 	}
@@ -268,7 +284,7 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 	for _, d := range list {
 		d.mu.Lock()
 		ls, lt := d.lessonCheck(lesson)
-		out = append(out, item{d.id, d.name, d.name, d.conn != nil, d.model, d.version, d.viewers, d.status, ls, lt})
+		out = append(out, item{d.id, d.name, d.name, d.conn != nil, d.model, d.version, d.viewers, d.status, d.codec, ls, lt})
 		d.mu.Unlock()
 		count[d.name]++
 	}
@@ -286,7 +302,7 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 // handleFPS: GET returns the frame rate, POST ?fps=N changes it for all headsets and saves it.
 func handleFPS(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		if o := r.Header.Get("Origin"); o != "" && !strings.HasSuffix(o, "://"+r.Host) {
+		if !sameOrigin(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -383,7 +399,7 @@ func watch(ctx context.Context, d *device, hq bool, send func([]byte) error) {
 // handleView: one WebSocket per tile. Chrome allows only 6 HTTP streams to one address,
 // so with 7+ headsets MJPEG over HTTP stalls; WebSockets do not have that limit.
 func handleView(w http.ResponseWriter, r *http.Request) {
-	if o := r.Header.Get("Origin"); o != "" && !strings.HasSuffix(o, "://"+r.Host) {
+	if !sameOrigin(r) {
 		http.Error(w, "forbidden", http.StatusForbidden) // only our own page
 		return
 	}
@@ -406,16 +422,31 @@ func handleView(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
-	watch(ctx, d, r.URL.Query().Get("hq") == "1", func(frame []byte) error {
+	send := func(frame []byte) error {
 		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		return conn.WriteMessage(websocket.BinaryMessage, frame)
-	})
+	}
+	d.mu.Lock()
+	h264 := d.codec == "h264"
+	d.mu.Unlock()
+	if h264 {
+		watchH264(ctx, d, r.URL.Query().Get("hq") == "1", send)
+	} else {
+		watch(ctx, d, r.URL.Query().Get("hq") == "1", send)
+	}
 }
 
 // handleStream sends the same MJPEG format as the headset itself (handy to open one headset in a tab).
 func handleStream(w http.ResponseWriter, r *http.Request) {
 	d := openViewer(w, r, "/stream/")
 	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	h264 := d.codec == "h264"
+	d.mu.Unlock()
+	if h264 {
+		http.Error(w, "this headset sends H.264 video: open it on the page", http.StatusUnsupportedMediaType)
 		return
 	}
 	flusher, _ := w.(http.Flusher)
@@ -556,7 +587,6 @@ func main() {
 	mux.HandleFunc("/api/fps", localOnly(handleFPS))
 	mux.HandleFunc("/api/lesson", localOnly(handleLesson))
 	mux.HandleFunc("/api/classes", localOnly(handleClasses))
-	mux.HandleFunc("/api/view", localOnly(handleViewMode))
 	mux.HandleFunc("/stream/", localOnly(handleStream))
 	mux.HandleFunc("/view/", localOnly(handleView))
 	mux.HandleFunc("/", localOnly(handleIndex))

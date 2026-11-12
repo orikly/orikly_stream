@@ -61,7 +61,7 @@ func handleClasses(w http.ResponseWriter, r *http.Request) {
 	fpsMu.Lock()
 	ensureClasses()
 	if r.Method == http.MethodPost {
-		if o := r.Header.Get("Origin"); o != "" && !strings.HasSuffix(o, "://"+r.Host) {
+		if !sameOrigin(r) {
 			fpsMu.Unlock()
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return

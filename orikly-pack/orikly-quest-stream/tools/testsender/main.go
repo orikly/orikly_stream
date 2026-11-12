@@ -35,6 +35,7 @@ var (
 	count   = flag.Int("count", 1, "load test: number of fake headsets")
 	mbit    = flag.Float64("mbit", 0, "load test: total traffic in Mbit/s (e.g. 14); 0 = normal mode (like one headset, waits for Start)")
 	loadFps = flag.Int("fps", 24, "load test: frames per second per fake headset")
+	codecFl = flag.String("codec", "h264", "normal mode: h264 (like app 0.5.0+) or jpeg (older app)")
 )
 
 // Load test: prepared frames (a real JPEG padded to the needed size) and shared statistics.
@@ -228,8 +229,13 @@ func run(u, host string, idx int) error {
 	if *count > 1 {
 		id, name = fmt.Sprintf("%s-%d", id, idx), fmt.Sprintf("%s #%d", name, idx)
 	}
+	h264 := *codecFl == "h264" && !loadMode()
+	codec := ""
+	if h264 {
+		codec = "h264"
+	}
 	hello, _ := json.Marshal(map[string]any{"type": "hello", "id": id, "name": name,
-		"model": "test", "version": "test"})
+		"model": "test", "version": "test", "codec": codec})
 	if err := send(websocket.TextMessage, hello); err != nil {
 		return err
 	}
@@ -245,6 +251,8 @@ func run(u, host string, idx int) error {
 	var mu sync.Mutex
 	on, hq, fps := loadMode(), false, 15
 	cropW := 1.0
+	restartClip, lastHq := true, false
+	clipPos := 0
 	if loadMode() {
 		fps = *loadFps
 	}
@@ -268,6 +276,7 @@ func run(u, host string, idx int) error {
 				On, Hq bool
 				Fps    int
 				Crop   []float64
+				Key    bool
 			}
 			json.Unmarshal(m, &w)
 			mu.Lock()
@@ -282,6 +291,10 @@ func run(u, host string, idx int) error {
 					if len(w.Crop) == 2 && w.Crop[1] > w.Crop[0] {
 						cropW = w.Crop[1] - w.Crop[0] // like the headset: a narrower picture
 					}
+					if w.Key || w.Hq != lastHq {
+						restartClip = true // a new viewer or another quality: start from a key frame
+					}
+					lastHq = w.Hq
 				}
 			case "ack":
 				if len(sentTimes) > 0 {
@@ -413,9 +426,28 @@ func run(u, host string, idx int) error {
 			continue
 		}
 		var jp []byte
-		if loadMode() {
+		switch {
+		case loadMode():
 			jp = loadFrames[n%len(loadFrames)]
-		} else {
+		case h264:
+			clip := frames360
+			if h {
+				clip = frames720
+			}
+			mu.Lock()
+			if restartClip {
+				clipPos, restartClip = 0, false
+			}
+			mu.Unlock()
+			f := clip[clipPos%len(clip)]
+			clipPos++
+			jp = make([]byte, len(f.data)+1)
+			jp[0] = 2
+			if f.key {
+				jp[0] = 1
+			}
+			copy(jp[1:], f.data)
+		default:
 			jp = picture(w, hh, n)
 		}
 		n++

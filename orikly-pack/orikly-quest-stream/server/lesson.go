@@ -20,7 +20,7 @@ func currentLesson() string {
 // handleLesson: GET returns the lesson app, POST ?app=... sets it (empty = no check) and saves it.
 func handleLesson(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		if o := r.Header.Get("Origin"); o != "" && !strings.HasSuffix(o, "://"+r.Host) {
+		if !sameOrigin(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

@@ -9,15 +9,15 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.graphics.Bitmap
-import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
-import android.media.ImageReader
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaFormat
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.wifi.WifiManager
-import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
@@ -26,33 +26,32 @@ import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
-import java.io.ByteArrayOutputStream
+import android.view.Surface
 
 /**
- * Foreground service: держит MediaProjection, кодирует кадры в JPEG и HTTP-сервер.
+ * Foreground service: держит MediaProjection и кодирует экран в H.264 аппаратным кодировщиком.
  * Порядок по требованию Android 14: сначала startForeground(mediaProjection),
  * потом getMediaProjection(), потом registerCallback(), потом createVirtualDisplay().
+ *
+ * Экран идёт прямо во входную поверхность кодировщика: без копирования процессором и без JPEG.
+ * Пока никто не смотрит, кодировщика нет (виртуальный экран без поверхности) — нагрузки почти нет.
  */
 class CaptureService : Service() {
 
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
-    private var reader: ImageReader? = null
     private var worker: HandlerThread? = null
-    private var http: HttpServer? = null
+    private var handler: Handler? = null
     private var relay: RelayClient? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private val wifiLocks = mutableListOf<WifiManager.WifiLock>()
 
-    private var rowBitmap: Bitmap? = null
-    private var outBitmap: Bitmap? = null
-    private var lastFrame: Bitmap? = null
-    private var smallBitmap: Bitmap? = null
-    private val scalePaint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
-    private val jpegBuffer = ByteArrayOutputStream(64 * 1024)
-    private var nextFrameAt = 0L
-    private var fpsWindowStart = 0L
-    private var fpsWindowFrames = 0
+    private var encoder: MediaCodec? = null
+    private var encoderSurface: Surface? = null
+    private var encKey = "" // размер и частота работающего кодировщика
+    private var codecConfig: ByteArray? = null // SPS/PPS — кладём перед каждым ключевым кадром
+    private var densityDpi = 160
+    private var encFrames = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -80,8 +79,6 @@ class CaptureService : Service() {
         )
 
         if (projection != null) return // уже идёт
-        WatchService.stop(this)
-        AutoStart.clearNotification(this)
         if (code != Activity.RESULT_OK || data == null) {
             fail("Permiso denegado")
             return
@@ -97,173 +94,224 @@ class CaptureService : Service() {
 
             val thread = HandlerThread("capture").also { it.start() }
             worker = thread
-            val handler = Handler(thread.looper)
+            val h = Handler(thread.looper)
+            handler = h
 
             mp.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
-                    // Система забрала захват (например, штатный каст Meta) или пользователь остановил.
+                    // Система забрала захват (сон, штатный каст Meta) или пользователь остановил.
                     handlerMain.post { if (projection === mp) stopCapture(byUser = false) }
                 }
-            }, handler)
+            }, h)
 
             val metrics = DisplayMetrics()
             val display = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
             @Suppress("DEPRECATION")
             display.getRealMetrics(metrics)
-            val srcW = metrics.widthPixels
-            val srcH = metrics.heightPixels
-            // VirtualDisplay сразу масштабирует экран до размера высокого качества;
-            // обычное качество получаем из него уменьшением при сжатии.
-            // Захват всегда 16:9 (1706×960): размер экрана, который сообщает система (500×800), — это окно
-            // панели, и картинка в нём выходила узкой. Обычное качество — уменьшением при сжатии.
-            val outH = StreamState.HQ_HEIGHT
-            val outW = StreamState.CAPTURE_WIDTH
-            StreamState.sourceWidth = srcW
-            StreamState.sourceHeight = srcH
-            StreamState.captureWidth = outW
-            StreamState.captureHeight = outH
+            StreamState.sourceWidth = metrics.widthPixels
+            StreamState.sourceHeight = metrics.heightPixels
             StreamState.displayHz = display.refreshRate
-            startSystemFpsMeter(handler)
-            startAppWatcher(handler)
+            densityDpi = metrics.densityDpi
 
-            val ir = ImageReader.newInstance(outW, outH, PixelFormat.RGBA_8888, 2)
-            reader = ir
-            ir.setOnImageAvailableListener({ onImage(it) }, handler)
-            StreamState.onFrameWanted = { handler.post { encodeLastFrame() } }
-
+            // Виртуальный экран создаём сразу (без поверхности): кодировщик подключается, когда кто-то смотрит.
             virtualDisplay = mp.createVirtualDisplay(
-                "orikly-stream", outW, outH, metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                ir.surface, null, handler
+                "orikly-stream", StreamState.GRID_WIDTH, StreamState.GRID_HEIGHT, densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, null, null, h
             )
 
+            StreamState.onEncoderChange = { h.post { reconcileEncoder() } }
+            StreamState.onKeyFrameRequest = { h.post { requestKeyFrame() } }
+            StreamState.onBitrateChange = { h.post { applyBitrate() } }
+            startFpsMeter(h)
+            startAppWatcher(h)
+
             acquireLocks()
-            http = HttpServer(this, BuildConfig.STREAM_KEY).also { it.start() }
             if (BuildConfig.RELAY_URL.isNotBlank()) {
                 relay = RelayClient(this, BuildConfig.RELAY_URL, BuildConfig.STREAM_KEY).also { it.start() }
             }
 
             StreamState.errorText = null
             StreamState.status = StreamState.Status.RUNNING
-            Log.i(TAG, "capture started ${srcW}x$srcH -> ${outW}x$outH")
+            Log.i(TAG, "capture started, screen ${metrics.widthPixels}x${metrics.heightPixels}")
         } catch (e: Exception) {
             Log.e(TAG, "start failed", e)
             fail(e.message ?: e.javaClass.simpleName)
         }
     }
 
-    /** Раз в 2 с пересчитывает частоту кадров системы. Работает и когда кадров нет совсем (тогда 0). */
-    private fun startSystemFpsMeter(handler: Handler) {
-        StreamState.systemFrames = 0
-        StreamState.systemFps = 0.0
+    // ---------- кодировщик ----------
+
+    /** Включить / выключить / пересобрать кодировщик под то, что просит ноутбук. Поток захвата. */
+    private fun reconcileEncoder() {
+        if (projection == null) return
+        if (!StreamState.relayWant) {
+            stopEncoder()
+            return
+        }
+        val hq = StreamState.relayHq
+        val w = if (hq) StreamState.HQ_WIDTH else StreamState.GRID_WIDTH
+        val h = if (hq) StreamState.HQ_HEIGHT else StreamState.GRID_HEIGHT
+        val fps = StreamState.targetFps.coerceIn(1, StreamState.MAX_FPS)
+        val key = "${w}x$h@$fps"
+        if (encoder != null && key == encKey) return
+        stopEncoder()
+        StreamState.bitrateScale = 1.0 // новое качество — начинаем с полного битрейта
+        try {
+            startEncoder(w, h, fps)
+            encKey = key
+        } catch (e: Exception) {
+            Log.e(TAG, "encoder start failed", e)
+            StreamState.errorText = "Codificador: ${e.message ?: e.javaClass.simpleName}"
+            stopEncoder()
+        }
+    }
+
+    /** Сначала с настройками низкой задержки; если кодировщик их не принимает — только с обязательными. */
+    private fun startEncoder(w: Int, h: Int, fps: Int) {
+        for (full in listOf(true, false)) {
+            val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            try {
+                codec.setCallback(encoderCallback(), handler)
+                codec.configure(format(w, h, fps, full), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                finishStart(codec, w, h)
+                return
+            } catch (e: Exception) {
+                runCatching { codec.release() }
+                if (!full) throw e
+                Log.w(TAG, "low-latency format rejected, retrying with a basic one", e)
+            }
+        }
+    }
+
+    private fun encoderCallback() = object : MediaCodec.Callback() {
+        override fun onInputBufferAvailable(c: MediaCodec, index: Int) {} // вход — поверхность
+
+        override fun onOutputBufferAvailable(c: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+            if (c !== encoder) return
+            try {
+                val buf = c.getOutputBuffer(index)
+                if (buf != null && info.size > 0) {
+                    buf.position(info.offset)
+                    buf.limit(info.offset + info.size)
+                    val bytes = ByteArray(info.size).also { buf.get(it) }
+                    if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                        codecConfig = bytes
+                    } else {
+                        val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
+                        val cfg = codecConfig
+                        // Ключевой кадр несёт с собой настройки видео: с него браузер может начать показ.
+                        val data = if (key && cfg != null) cfg + bytes else bytes
+                        StreamState.publish(StreamState.Frame(key, data, SystemClock.elapsedRealtime()))
+                        encFrames++
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "output", e)
+            } finally {
+                runCatching { c.releaseOutputBuffer(index, false) }
+            }
+        }
+
+        override fun onError(c: MediaCodec, e: MediaCodec.CodecException) {
+            Log.e(TAG, "encoder error", e)
+            handler?.post { if (c === encoder) { encKey = ""; reconcileEncoder() } }
+        }
+
+        override fun onOutputFormatChanged(c: MediaCodec, format: MediaFormat) {}
+    }
+
+    private fun format(w: Int, h: Int, fps: Int, full: Boolean) =
+        MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, StreamState.currentBitrate())
+            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, StreamState.KEY_INTERVAL_S)
+            // Экран обновляется 72–90 раз в секунду: кодировщик берёт не больше fps кадров.
+            setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, fps.toFloat())
+            // Неподвижный экран не даёт новых кадров: повторяем последний, чтобы поток не замирал.
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 200_000L)
+            if (full) {
+                // Ровный битрейт, без «кадров из будущего» (B-кадров), приоритет реального времени.
+                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setInteger(MediaFormat.KEY_LATENCY, 1)
+                // Baseline — самый простой профиль: его декодирует любой браузер, без B-кадров.
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+            }
+        }
+
+    private fun finishStart(codec: MediaCodec, w: Int, h: Int) {
+        val surface = codec.createInputSurface()
+        encoder = codec
+        encoderSurface = surface
+        codecConfig = null
+        codec.start()
+        virtualDisplay?.resize(w, h, densityDpi)
+        virtualDisplay?.surface = surface
+        StreamState.encWidth = w
+        StreamState.encHeight = h
+        StreamState.encoderName = runCatching { codec.name }.getOrDefault("")
+        Log.i(TAG, "encoder ${codec.name} ${w}x$h @${StreamState.targetFps} fps, ${StreamState.currentBitrate()} bps")
+    }
+
+    private fun stopEncoder() {
+        virtualDisplay?.surface = null
+        val codec = encoder
+        encoder = null
+        encKey = ""
+        codec?.let { c ->
+            runCatching { c.stop() }
+            runCatching { c.release() }
+        }
+        encoderSurface?.release()
+        encoderSurface = null
+        codecConfig = null
+        StreamState.clearFrames()
+    }
+
+    private fun requestKeyFrame() {
+        runCatching {
+            encoder?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+        }
+    }
+
+    private fun applyBitrate() {
+        runCatching {
+            encoder?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, StreamState.currentBitrate()) })
+        }
+    }
+
+    /** Раз в 2 с: сколько кадров в секунду выдаёт кодировщик. */
+    private fun startFpsMeter(h: Handler) {
+        encFrames = 0
         var lastCount = 0L
         var lastAt = SystemClock.elapsedRealtime()
-        handler.postDelayed(object : Runnable {
+        h.postDelayed(object : Runnable {
             override fun run() {
                 if (projection == null) return
                 val now = SystemClock.elapsedRealtime()
-                val count = StreamState.systemFrames
-                StreamState.systemFps = (count - lastCount) * 1000.0 / maxOf(1L, now - lastAt)
-                lastCount = count; lastAt = now
-                handler.postDelayed(this, 2000)
+                StreamState.encFps = (encFrames - lastCount) * 1000.0 / maxOf(1L, now - lastAt)
+                lastCount = encFrames; lastAt = now
+                h.postDelayed(this, 2000)
             }
         }, 2000)
     }
 
     /** Раз в секунду: в каком приложении ученик (нужно разрешение Usage access). */
-    private fun startAppWatcher(handler: Handler) {
+    private fun startAppWatcher(h: Handler) {
         AppWatcher.reset()
-        handler.post(object : Runnable {
+        h.post(object : Runnable {
             override fun run() {
                 if (projection == null) return
                 runCatching { AppWatcher.poll(this@CaptureService) }.onFailure { Log.w(TAG, "app watcher", it) }
-                handler.postDelayed(this, 1000)
+                h.postDelayed(this, 1000)
             }
         })
     }
 
-    private fun onImage(ir: ImageReader) {
-        StreamState.systemFrames++ // каждый вызов = система дала новый кадр экрана
-        val image = try {
-            ir.acquireLatestImage()
-        } catch (e: IllegalStateException) {
-            null
-        } ?: return
-        try {
-            val now = SystemClock.elapsedRealtime()
-            val wanted = StreamState.wantsFrames(now)
-            // Без зрителей только обновляем кадр в памяти раз в секунду (дёшево), без JPEG.
-            val interval = if (wanted) 1000L / StreamState.targetFps.coerceIn(1, StreamState.MAX_FPS) else 1000L
-            // Расписание с шагом ровно interval: система даёт кадры неровно (30–72 Гц),
-            // и простое «прошло ≥ interval» давало меньше кадров, чем нужно (было ~9 вместо 10).
-            if (nextFrameAt - now > interval) nextFrameAt = now // зритель только что появился: не ждать «холостую» секунду
-            if (now < nextFrameAt) return
-            nextFrameAt = if (now - nextFrameAt > interval) now + interval else nextFrameAt + interval
-
-            val plane = image.planes[0]
-            val w = image.width
-            val h = image.height
-            // В строке буфера может быть хвост (rowStride > width * 4).
-            val rowW = plane.rowStride / plane.pixelStride
-            val src = rowBitmap?.takeIf { it.width == rowW && it.height == h }
-                ?: Bitmap.createBitmap(rowW, h, Bitmap.Config.ARGB_8888).also { rowBitmap = it }
-            plane.buffer.rewind()
-            src.copyPixelsFromBuffer(plane.buffer)
-            val frame = if (rowW == w) src else {
-                val dst = outBitmap?.takeIf { it.width == w && it.height == h }
-                    ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { outBitmap = it }
-                android.graphics.Canvas(dst).drawBitmap(src, 0f, 0f, null)
-                dst
-            }
-            lastFrame = frame
-            if (wanted) encode(frame, now)
-        } catch (e: Exception) {
-            Log.w(TAG, "frame error", e)
-        } finally {
-            image.close()
-        }
-    }
-
-    /** Вызывается на потоке захвата: сжать последний кадр сразу, не дожидаясь изменений на экране. */
-    private fun encodeLastFrame() {
-        val frame = lastFrame ?: return
-        runCatching { encode(frame, SystemClock.elapsedRealtime()) }
-            .onFailure { Log.w(TAG, "encode error", it) }
-    }
-
-    private fun encode(frame: Bitmap, now: Long) {
-        val hq = StreamState.hqWanted()
-        val ladder = if (hq) StreamState.HQ_LADDER else StreamState.NORMAL_LADDER
-        val (targetH, quality) = ladder[StreamState.relayLevel.coerceIn(0, ladder.size - 1)]
-        // Обрезка по ширине («View» на странице): шлём только выбранную часть — кадр уже и легче.
-        val l = StreamState.cropLeft.coerceIn(0f, 0.9f)
-        val r = StreamState.cropRight.coerceIn(l + 0.1f, 1f)
-        val x0 = (frame.width * l).toInt()
-        val x1 = (frame.width * r).toInt()
-        val full = x0 == 0 && x1 >= frame.width
-        val out = if (full && frame.height <= targetH) frame else {
-            val h = minOf(targetH, frame.height)
-            val w = ((x1 - x0).toLong() * h / frame.height).toInt().coerceAtLeast(2).let { it - it % 2 }
-            val dst = smallBitmap?.takeIf { it.width == w && it.height == h }
-                ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { smallBitmap = it }
-            android.graphics.Canvas(dst).drawBitmap(
-                frame, android.graphics.Rect(x0, 0, x1, frame.height), android.graphics.Rect(0, 0, w, h), scalePaint
-            )
-            dst
-        }
-        StreamState.outWidth = out.width
-        StreamState.outHeight = out.height
-        jpegBuffer.reset()
-        out.compress(Bitmap.CompressFormat.JPEG, quality, jpegBuffer)
-        StreamState.publish(jpegBuffer.toByteArray())
-
-        fpsWindowFrames++
-        if (now - fpsWindowStart >= 2000) {
-            StreamState.fps = fpsWindowFrames * 1000.0 / (now - fpsWindowStart)
-            fpsWindowStart = now
-            fpsWindowFrames = 0
-        }
-    }
+    // ---------- жизненный цикл ----------
 
     private fun fail(text: String) {
         StreamState.errorText = text
@@ -278,26 +326,30 @@ class CaptureService : Service() {
         val wasRunning = projection != null
         releaseAll()
         StreamState.status = if (byUser) StreamState.Status.IDLE else StreamState.Status.STOPPED
-        // Захват забрала система (сон, каст Meta): ждём выхода из сна и предлагаем запуск снова.
-        if (wasRunning && !byUser) WatchService.start(this)
         stopForeground(STOP_FOREGROUND_REMOVE)
         if (wasRunning && !byUser) notifyStopped("Transmisión detenida. Abre la app para reanudar.")
         stopSelf()
     }
 
     private fun releaseAll() {
-        http?.stop(); http = null
         relay?.stop(); relay = null
-        StreamState.onFrameWanted = null
-        lastFrame = null
-        smallBitmap = null
+        StreamState.onEncoderChange = null
+        StreamState.onKeyFrameRequest = null
+        StreamState.onBitrateChange = null
+        val h = handler
+        if (h != null && Thread.currentThread() !== worker) {
+            // Кодировщик живёт на потоке захвата — останавливаем там же.
+            val done = java.util.concurrent.CountDownLatch(1)
+            h.post { stopEncoder(); done.countDown() }
+            done.await(1, java.util.concurrent.TimeUnit.SECONDS)
+        } else stopEncoder()
         virtualDisplay?.release(); virtualDisplay = null
-        reader?.close(); reader = null
         projection?.let { p -> projection = null; runCatching { p.stop() } }
         worker?.quitSafely(); worker = null
-        StreamState.clearFrame()
-        StreamState.fps = 0.0
-        StreamState.systemFps = 0.0
+        handler = null
+        StreamState.encFps = 0.0
+        StreamState.encWidth = 0
+        StreamState.encHeight = 0
         releaseLocks()
     }
 

@@ -7,22 +7,8 @@
 <script>
 // ======================= CONFIG =======================
 const CONFIG = {
-  port: 8080,
-  key: "CHANGE_ME",          // same as STREAM_KEY secret in GitHub
-  fps: 15,                   // recording frame rate (server mode: the FPS chosen at the top of the page)
+  fps: 15,                   // recording frame rate (the FPS chosen at the top of the page)
   videoBitsPerSecond: 1000000,
-  devices: [
-    { name: "Q3-01", ip: "192.168.1.101" },
-    { name: "Q3-02", ip: "192.168.1.102" },
-    { name: "Q3-03", ip: "192.168.1.103" },
-    { name: "Q3-04", ip: "192.168.1.104" },
-    { name: "Q3-05", ip: "192.168.1.105" },
-    { name: "Q3-06", ip: "192.168.1.106" },
-    { name: "Q3-07", ip: "192.168.1.107" },
-    { name: "Q3-08", ip: "192.168.1.108" },
-    { name: "Q3-09", ip: "192.168.1.109" },
-    { name: "Q3-10", ip: "192.168.1.110" },
-  ],
 };
 // ======================================================
 </script>
@@ -111,23 +97,13 @@ const CONFIG = {
   <label id="lessonBox" title="App of this lesson, as shown on the tiles. Empty = no check.">Lesson app
     <input id="lessonInput" list="appList" placeholder="type or pick…" autocomplete="off"></label>
   <datalist id="appList"></datalist>
-  <label id="viewBox" title="Part of the picture the headsets send. Narrower = lighter frames, less delay.">View
-    <select id="viewSelect"><option value="full">Full</option><option value="c75">Center 75%</option>
-      <option value="c50">Center 50%</option><option value="left">Left half</option><option value="right">Right half</option></select></label>
   <label id="fpsBox" title="Frames per second asked from every headset (headsets with app 0.4.6+)">FPS
     <select id="fpsSelect"><option>10</option><option>15</option><option>20</option><option>24</option></select></label>
   <label><input type="checkbox" id="recordToggle" checked> Record</label>
   <button id="pickFolder">Choose folder…</button>
   <span id="folderName" class="muted">No folder — recordings will download on stop</span>
-  <button id="openSettings">Settings</button>
   <span id="summary" class="muted"></span>
 </header>
-<dialog id="settings">
-  <h2>Settings</h2>
-  <label style="display:block">Access key (same as STREAM_KEY)<input type="text" id="setKey" autocomplete="off"></label>
-  <div class="devrows" id="setDevices"></div>
-  <div class="actions"><button id="setCancel">Cancel</button><button id="setSave" class="primary">Save</button></div>
-</dialog>
 <dialog id="classList">
   <h2 id="clTitle">Class list</h2>
   <label style="display:block">Students, separated by commas
@@ -141,16 +117,7 @@ const CONFIG = {
 
 <script>
 const $ = (id) => document.getElementById(id);
-// Served by orikly-server (internet mode): headsets are found by name, no IPs or key needed here.
-// Opened as a file (local mode): headsets by IP from CONFIG / Settings.
-const SERVER_MODE = location.protocol.startsWith("http");
-const base = (d) => `http://${d.ip}:${CONFIG.port}`;
-const streamUrl = (d, hq) => SERVER_MODE
-  ? `/stream/${encodeURIComponent(d.id)}${hq ? "?hq=1" : ""}`
-  : `${base(d)}/stream?${q()}${hq ? "&hq=1" : ""}`;
-const q = () => `key=${encodeURIComponent(CONFIG.key)}`;
-const enc = new TextEncoder();
-const HEADER_END = enc.encode("\r\n\r\n");
+// The page is served by orikly-server: headsets are found by themselves (by a unique id).
 
 // ---------- recordings folder (remembered between sessions) ----------
 let folder = null;
@@ -237,11 +204,9 @@ class Tile {
     this.appLine = this.el.querySelector(".appline");
     this.nameEl = this.el.querySelector(".name");
     this.showTitle();
-    if (SERVER_MODE) {
-      this.nameEl.title = "Click to rename";
-      this.nameEl.style.cursor = "pointer";
-      this.nameEl.onclick = () => renameTile(this);
-    }
+    this.nameEl.title = "Click to rename";
+    this.nameEl.style.cursor = "pointer";
+    this.nameEl.onclick = () => renameTile(this);
     this.btn.onclick = () => (this.active ? this.stop() : this.start($("recordToggle").checked));
     this.el.querySelector(".screen").onclick = () => toggleExpand(this);
     this.blank();
@@ -249,13 +214,12 @@ class Tile {
 
   // Server mode: own name given on this laptop, else what the server reports.
   title() {
-    if (!SERVER_MODE) return this.dev.name;
     const sn = this.dev.serial ? `${this.dev.name || "Quest"} · SN ${this.dev.serial}` : "";
     return labels()[this.dev.id] || sn || this.dev.label || this.dev.name || this.dev.id;
   }
 
   showTitle() {
-    this.nameEl.textContent = SERVER_MODE ? this.title() : `${this.dev.name} · ${this.dev.ip}`;
+    this.nameEl.textContent = this.title();
   }
 
   blank() {
@@ -288,6 +252,7 @@ class Tile {
     this.wantRecord = false;
     this.abort?.abort();
     this.abort = null;
+    this.resetDecoder(null);
     this.btn.textContent = "Start";
     this.btn.className = "toggle primary";
     this.overlay.textContent = "Idle";
@@ -295,47 +260,17 @@ class Tile {
     updateSummary();
   }
 
-  // MJPEG via fetch: we parse frames ourselves, so the canvas stays recordable.
-  async connect() {
-    if (!this.active) return;
-    if (SERVER_MODE) return this.connectWs();
-    const ctrl = new AbortController();
-    this.abort = ctrl;
-    try {
-      const url = streamUrl(this.dev, this.hq);
-      const res = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
-      if (res.status === 403) throw new Error("Wrong key");
-      if (res.status === 503) throw new Error("Too many viewers");
-      if (res.status === 404) throw new Error("Headset offline");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const reader = res.body.getReader();
-      let buf = new Uint8Array(0);
-      this.lastFrameAt = Date.now();
-      this.watchdog(ctrl);
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf = concat(buf, value);
-        let frame;
-        while ((frame = takeFrame(buf))) {
-          buf = frame.rest;
-          if (frame.jpeg) await this.draw(frame.jpeg);
-        }
-      }
-      throw new Error("Stream ended");
-    } catch (e) {
-      if (ctrl.signal.aborted && (!this.active || this.abort !== ctrl)) return; // stopped or switched by us
-      this.setState("bad", e.name === "TypeError" ? "No connection" : e.message);
-      this.overlay.textContent = "No connection — retrying…";
-    }
-    if (this.active && this.abort === ctrl) setTimeout(() => this.connect(), 3000);
+  connect() {
+    if (this.active) this.connectWs();
   }
 
-  // Server mode: one WebSocket per tile (Chrome allows only 6 HTTP streams to one address).
+  // One WebSocket per tile (Chrome allows only 6 HTTP streams to one address).
   connectWs() {
     const ctrl = new AbortController();
     this.abort = ctrl;
-    const url = `ws://${location.host}/view/${encodeURIComponent(this.dev.id)}${this.hq ? "?hq=1" : ""}`;
+    const proto = location.protocol === "https:" ? "wss" : "ws"; // https: through "tailscale serve"
+    const url = `${proto}://${location.host}/view/${encodeURIComponent(this.dev.id)}${this.hq ? "?hq=1" : ""}`;
+    this.resetDecoder(null); // a new connection starts with a key frame
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
     ctrl.signal.addEventListener("abort", () => ws.close());
@@ -343,9 +278,14 @@ class Tile {
     this.watchdog(ctrl);
     ws.onmessage = (e) => {
       if (typeof e.data === "string") return;
-      // Draw only the newest frame; if decoding falls behind, skip old ones instead of lagging.
-      this.pending = new Uint8Array(e.data);
-      if (!this.drawing) this.drawPending();
+      const buf = new Uint8Array(e.data);
+      this.lastFrameAt = Date.now();
+      // JPEG (app before 0.5.0) starts with FF D8; H.264 messages start with a type byte (1 or 2).
+      if (buf[0] === 0xff && buf[1] === 0xd8) {
+        // Draw only the newest frame; if decoding falls behind, skip old ones instead of lagging.
+        this.pending = buf;
+        if (!this.drawing) this.drawPending();
+      } else this.handleH264(buf);
     };
     ws.onclose = () => {
       if (ctrl.signal.aborted && (!this.active || this.abort !== ctrl)) return; // stopped or switched by us
@@ -353,6 +293,46 @@ class Tile {
       this.overlay.textContent = "No connection — retrying…";
       if (this.active && this.abort === ctrl) setTimeout(() => this.connect(), 3000);
     };
+  }
+
+  // ---------- H.264 (app 0.5.0+): 1 byte type (1 = key frame with SPS/PPS, 2 = ordinary) + Annex B ----------
+  // Frames depend on each other, so all are decoded in order; only the newest decoded picture is drawn.
+  handleH264(buf) {
+    if (!window.VideoDecoder) {
+      this.overlay.textContent = "H.264 video needs Chrome, page opened on localhost or https";
+      return;
+    }
+    const key = buf[0] === 1;
+    const data = buf.subarray(1);
+    if (key) {
+      const codec = avcCodec(data);
+      if (!this.decoder || this.decoder.state === "closed" || codec !== this.codec) this.resetDecoder(codec);
+      this.waitKey = false;
+    }
+    if (!this.decoder || this.waitKey) return; // nothing to start from until the next key frame
+    if (this.decoder.decodeQueueSize > 30) { // this laptop fell behind: start again from the next key frame
+      this.resetDecoder(null);
+      return;
+    }
+    try {
+      this.ts = (this.ts || 0) + 1;
+      this.decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: this.ts * 1000, data }));
+    } catch { this.resetDecoder(null); }
+  }
+
+  resetDecoder(codec) {
+    try { if (this.decoder && this.decoder.state !== "closed") this.decoder.close(); } catch {}
+    this.decoder = null;
+    this.waitKey = true;
+    this.codec = codec;
+    if (!codec || !window.VideoDecoder) return;
+    this.decoder = new VideoDecoder({
+      output: (frame) => {
+        try { this.paint(frame, frame.displayWidth, frame.displayHeight); } finally { frame.close(); }
+      },
+      error: () => { this.decoder = null; this.waitKey = true; },
+    });
+    this.decoder.configure({ codec, optimizeForLatency: true });
   }
 
   async drawPending() {
@@ -383,19 +363,26 @@ class Tile {
     this.lastFrameAt = Date.now();
     try {
       const bmp = await createImageBitmap(new Blob([jpeg], { type: "image/jpeg" }));
-      if (this.canvas.width !== bmp.width || this.canvas.height !== bmp.height) {
+      try { this.paint(bmp, bmp.width, bmp.height); } finally { bmp.close(); }
+    } catch {}
+  }
+
+  // Draws one picture (JPEG bitmap or decoded H.264 frame) and keeps the counters and recording going.
+  paint(src, w, h) {
+    this.lastFrameAt = Date.now();
+    try {
+      if (this.canvas.width !== w || this.canvas.height !== h) {
         // Size change only before recording starts would be ideal; recorder keeps working anyway.
-        this.canvas.width = bmp.width; this.canvas.height = bmp.height;
+        this.canvas.width = w; this.canvas.height = h;
       }
-      this.ctx.drawImage(bmp, 0, 0);
+      this.ctx.drawImage(src, 0, 0);
       // Recording uses its own canvas with a fixed size, so switching quality does not break the file.
-      if (this.recCanvas) { // fit the picture into the fixed-size recording, keeping its shape (View can change it)
-        const rw = this.recCanvas.width, rh = this.recCanvas.height, k = Math.min(rw / bmp.width, rh / bmp.height);
-        const dw = Math.round(bmp.width * k), dh = Math.round(bmp.height * k);
+      if (this.recCanvas) { // fit the picture into the fixed-size recording, keeping its shape
+        const rw = this.recCanvas.width, rh = this.recCanvas.height, k = Math.min(rw / w, rh / h);
+        const dw = Math.round(w * k), dh = Math.round(h * k);
         if (dw !== rw || dh !== rh) { this.recCtx.fillStyle = "#000"; this.recCtx.fillRect(0, 0, rw, rh); }
-        this.recCtx.drawImage(bmp, (rw - dw) >> 1, (rh - dh) >> 1, dw, dh);
+        this.recCtx.drawImage(src, (rw - dw) >> 1, (rh - dh) >> 1, dw, dh);
       }
-      bmp.close();
       this.overlay.textContent = "";
       // Real frame rate as seen on this laptop.
       const now = performance.now();
@@ -417,7 +404,7 @@ class Tile {
     const mime = pickMime();
     if (!mime) { warn("This browser cannot record video. Use Chrome."); return; }
     const ext = mime.startsWith("video/mp4") ? "mp4" : "webm";
-    const cls = SERVER_MODE && className() ? className() + "_" : "";
+    const cls = className() ? className() + "_" : "";
     const safe = (cls + this.title()).replace(/[\\/:*?"<>|·]+/g, "-").replace(/\s+/g, "_");
     const fileName = `${safe}_${stamp()}.${ext}`;
     const h = Math.min(this.canvas.height, 480);
@@ -472,13 +459,14 @@ class Tile {
     const parts = [];
     if (s.battery != null) parts.push(`🔋 ${s.battery}%`);
     if (s.rssi != null) parts.push(`📶 ${s.rssi} dBm`);
-    if (s.level > 0) parts.push(`⚠ quality −${s.level}`); // headset lowered quality to keep 10 fps
+    if (s.codec === "h264") { if (s.bitrateScale != null && s.bitrateScale < 100) parts.push(`⚠ bitrate ${s.bitrateScale}%`); }
+    else if (s.level > 0) parts.push(`⚠ quality −${s.level}`); // headset lowered quality to keep the frame rate
     if (this.active && s.rtt > 0) parts.push(`⏱ ${s.rtt} ms`); // headset → laptop round trip
     this.extra.textContent = info.online ? parts.join("  ") : "";
     // Diagnostics: "system" = frames/s the headset OS gives to the app, "sent" = frames/s sent to this laptop.
     // System ~1 fps -> the headset itself gives no frames; system 10+ but few arrive -> frames are lost on the way.
     if (info.online && s.capturing && s.sysFps != null) {
-      const d = [info.model, `system ${s.sysFps} fps`].filter(Boolean);
+      const d = [info.model, s.codec === "h264" ? `H.264 ${Math.round((s.bitrate || 0) / 1000)} kbit/s · encoder ${s.sysFps} fps` : `system ${s.sysFps} fps`].filter(Boolean);
       if (this.active) d.push(`sent ${Math.round(s.sentFps * 10) / 10}${s.targetFps ? " of " + s.targetFps : ""} fps`);
       if (s.capture) d.push(`capture ${s.capture}`);
       if (s.source) d.push(`screen ${s.source}${s.hz ? " " + s.hz + " Hz" : ""}`);
@@ -510,78 +498,19 @@ class Tile {
     else if (!this.active) this.setState("ok", "Online · ready");
   }
 
-  async pollStatus() {
-    if (SERVER_MODE) return;
-    try {
-      const r = await fetch(`${base(this.dev)}/status?${q()}`, { cache: "no-store", signal: AbortSignal.timeout(3000) });
-      if (r.status === 403) { this.setState("bad", "Wrong key"); this.extra.textContent = ""; return; }
-      const s = await r.json();
-      const parts = [];
-      if (s.battery != null) parts.push(`🔋 ${s.battery}%`);
-      if (s.rssi != null) parts.push(`📶 ${s.rssi} dBm`);
-      this.extra.textContent = parts.join("  ");
-      if (!this.active) this.setState("ok", s.capturing ? "Online · ready" : "Online · not capturing");
-    } catch {
-      this.extra.textContent = "";
-      if (!this.active || Date.now() - this.lastFrameAt > 5000)
-        this.setState("bad", "Offline — open app on headset");
+}
+
+
+
+// Codec string for the browser's decoder, from the SPS in a key frame (Annex B): "avc1.PPCCLL".
+function avcCodec(data) {
+  for (let i = 0; i + 4 < data.length; i++) {
+    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1 && (data[i + 3] & 0x1f) === 7) {
+      const hex = (b) => b.toString(16).padStart(2, "0").toUpperCase();
+      return `avc1.${hex(data[i + 4])}${hex(data[i + 5])}${hex(data[i + 6])}`;
     }
   }
-}
-
-function concat(a, b) {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a); out.set(b, a.length);
-  return out;
-}
-function indexOf(buf, pat, from = 0) {
-  outer: for (let i = from; i <= buf.length - pat.length; i++) {
-    for (let j = 0; j < pat.length; j++) if (buf[i + j] !== pat[j]) continue outer;
-    return i;
-  }
-  return -1;
-}
-// One multipart part: headers with Content-Length, blank line, JPEG bytes.
-function takeFrame(buf) {
-  const h = indexOf(buf, HEADER_END);
-  if (h < 0) return null;
-  const head = new TextDecoder().decode(buf.subarray(0, h));
-  const m = /content-length:\s*(\d+)/i.exec(head);
-  if (!m) return { jpeg: null, rest: buf.subarray(h + 4) }; // skip junk without length
-  const len = +m[1], start = h + 4;
-  if (buf.length < start + len) return null;
-  const jpeg = buf.slice(start, start + len);
-  return { jpeg, rest: buf.subarray(start + len) };
-}
-
-// ---------- settings saved in this browser (override CONFIG above) ----------
-try {
-  const saved = JSON.parse(localStorage.getItem("orikly-config") || "null");
-  if (saved?.key) CONFIG.key = saved.key;
-  if (Array.isArray(saved?.devices) && saved.devices.length) CONFIG.devices = saved.devices;
-} catch {}
-
-function openSettings() {
-  $("setKey").value = CONFIG.key === "CHANGE_ME" ? "" : CONFIG.key;
-  const box = $("setDevices");
-  box.innerHTML = "<span class='muted'>Name</span><span class='muted'>IP address</span>";
-  CONFIG.devices.forEach((d) => {
-    for (const [cls, val] of [["n", d.name], ["i", d.ip]]) {
-      const inp = Object.assign(document.createElement("input"), { type: "text", value: val, className: cls });
-      box.appendChild(inp);
-    }
-  });
-  $("settings").showModal();
-}
-function saveSettings() {
-  const names = [...document.querySelectorAll("#setDevices input.n")].map((i) => i.value.trim());
-  const ips = [...document.querySelectorAll("#setDevices input.i")].map((i) => i.value.trim());
-  const devices = names.map((name, k) => ({ name, ip: ips[k] })).filter((d) => d.name && d.ip);
-  if (tiles.some((t) => t.recorder) && !confirm("Recording is running. Stop it and apply settings?")) return;
-  try {
-    localStorage.setItem("orikly-config", JSON.stringify({ key: $("setKey").value.trim(), devices }));
-  } catch { alert("Cannot save settings in this browser."); return; }
-  Promise.all(tiles.map((t) => t.stop())).then(() => location.reload());
+  return "avc1.42E01F"; // Baseline 3.1
 }
 
 // ---------- page ----------
@@ -603,7 +532,6 @@ function sortTiles() {
   tiles.sort((a, b) => a.title().localeCompare(b.title(), undefined, { numeric: true }));
   tiles.forEach((x) => $("grid").appendChild(x.el));
 }
-if (!SERVER_MODE) CONFIG.devices.forEach(addTile);
 
 // Server mode: headsets appear by themselves, identified by a unique id (names can repeat).
 // Headsets seen before are kept so their tiles stay in place; names given here are remembered.
@@ -612,7 +540,7 @@ const KNOWN_KEY = "orikly-known-headsets-v2";
 let classes = { current: 0, classes: [] };
 const className = () => classes.classes[classes.current]?.name || "";
 function labels() {
-  return (SERVER_MODE && classes.classes[classes.current]?.names) || {};
+  return classes.classes[classes.current]?.names || {};
 }
 function showClasses() {
   const sel = $("classSelect");
@@ -716,10 +644,7 @@ async function pollServer() {
     warn("Server program is not running. Start orikly-server on this laptop.");
   }
 }
-if (SERVER_MODE) {
-  try { JSON.parse(localStorage.getItem(KNOWN_KEY) || "[]").forEach(addTile); } catch {}
-  $("openSettings").style.display = "none";
-}
+try { JSON.parse(localStorage.getItem(KNOWN_KEY) || "[]").forEach(addTile); } catch {}
 
 let expanded = null;
 function toggleExpand(tile) {
@@ -742,9 +667,6 @@ $("startAll").onclick = async () => {
 };
 $("stopAll").onclick = () => tiles.forEach((t) => t.stop());
 $("pickFolder").onclick = pickFolder;
-$("openSettings").onclick = openSettings;
-$("setCancel").onclick = () => $("settings").close();
-$("setSave").onclick = saveSettings;
 
 // Finish files properly if the page is closed while recording.
 window.addEventListener("beforeunload", (e) => {
@@ -752,8 +674,7 @@ window.addEventListener("beforeunload", (e) => {
 });
 
 (async () => {
-  if (!SERVER_MODE && (!CONFIG.key || CONFIG.key === "CHANGE_ME")) warn("Open Settings and enter the access key (same as the STREAM_KEY secret).");
-  if (SERVER_MODE) {
+  {
     try { CONFIG.fps = (await (await fetch("/api/fps", { cache: "no-store" })).json()).fps || CONFIG.fps; } catch {}
     const sel = $("fpsSelect");
     if (![...sel.options].some((o) => +o.value === CONFIG.fps)) sel.add(new Option(String(CONFIG.fps)));
@@ -775,11 +696,6 @@ window.addEventListener("beforeunload", (e) => {
     $("lessonInput").onkeydown = (e) => { if (e.key === "Enter") $("lessonInput").blur(); };
     await classesCall("");
     $("classSelect").onchange = () => classesCall(`current=${$("classSelect").value}`);
-    try { $("viewSelect").value = (await (await fetch("/api/view", { cache: "no-store" })).json()).view || "full"; } catch {}
-    $("viewSelect").onchange = async () => {
-      try { await fetch(`/api/view?view=${$("viewSelect").value}`, { method: "POST" }); }
-      catch { warn("Cannot change the view: server program is not running."); }
-    };
     $("openClassList").onclick = openClassList;
     $("clStudents").oninput = refreshClassList;
     $("clCancel").onclick = () => $("classList").close();
@@ -788,19 +704,11 @@ window.addEventListener("beforeunload", (e) => {
       const n = prompt("Name of this class", className());
       if (n && n.trim()) classesCall(`rename=${classes.current}&name=${encodeURIComponent(n.trim())}`);
     };
-  } else {
-    for (const id of ["fpsBox", "viewBox", "lessonBox", "classBox", "renameClass", "openClassList"]) $(id).style.display = "none";
   }
   folder = (await kvGet("folder")) || null;
   showFolder();
-  if (SERVER_MODE) {
-    pollServer();
-    setInterval(pollServer, 3000);
-  } else {
-    const poll = () => tiles.forEach((t) => t.pollStatus());
-    poll();
-    setInterval(poll, 10000);
-  }
+  pollServer();
+  setInterval(pollServer, 3000);
 })();
 </script>
 </body>
