@@ -80,6 +80,8 @@ class CaptureService : Service() {
         )
 
         if (projection != null) return // уже идёт
+        WatchService.stop(this)
+        AutoStart.clearNotification(this)
         if (code != Activity.RESULT_OK || data == null) {
             fail("Permiso denegado")
             return
@@ -276,6 +278,8 @@ class CaptureService : Service() {
         val wasRunning = projection != null
         releaseAll()
         StreamState.status = if (byUser) StreamState.Status.IDLE else StreamState.Status.STOPPED
+        // Захват забрала система (сон, каст Meta): ждём выхода из сна и предлагаем запуск снова.
+        if (wasRunning && !byUser) WatchService.start(this)
         stopForeground(STOP_FOREGROUND_REMOVE)
         if (wasRunning && !byUser) notifyStopped("Transmisión detenida. Abre la app para reanudar.")
         stopSelf()

@@ -75,6 +75,35 @@ class MainActivity : Activity() {
         ) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
         }
+        handleAuto(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleAuto(intent)
+    }
+
+    /** Открыто автозапуском (после включения / сна): сразу окно подтверждения, без «Iniciar». */
+    private fun handleAuto(i: Intent?) {
+        if (i?.getBooleanExtra(AutoStart.EXTRA_AUTO, false) != true) return
+        i.removeExtra(AutoStart.EXTRA_AUTO)
+        AutoStart.clearNotification(this)
+        if (StreamState.status == StreamState.Status.RUNNING) { finish(); return }
+        autoMode = true
+        requestCapture()
+    }
+
+    private var autoMode = false
+
+    /** Окно подтверждения захвата. На Android 14 сразу «весь экран» — выбирать «Pantalla completa» не нужно. */
+    private fun requestCapture() {
+        // Каждый раз новое согласие: токен MediaProjection одноразовый.
+        val mpm = getSystemService(MediaProjectionManager::class.java)
+        val i = if (Build.VERSION.SDK_INT >= 34)
+            mpm.createScreenCaptureIntent(android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay())
+        else mpm.createScreenCaptureIntent()
+        @Suppress("DEPRECATION")
+        startActivityForResult(i, REQ_CAPTURE)
     }
 
     override fun onResume() {
@@ -91,10 +120,8 @@ class MainActivity : Activity() {
         if (StreamState.status == StreamState.Status.RUNNING) {
             CaptureService.stop(this)
         } else {
-            // Каждый раз новое согласие: токен MediaProjection одноразовый.
-            val mpm = getSystemService(MediaProjectionManager::class.java)
-            @Suppress("DEPRECATION")
-            startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE)
+            autoMode = false
+            requestCapture()
         }
     }
 
@@ -105,8 +132,16 @@ class MainActivity : Activity() {
         if (requestCode != REQ_CAPTURE) return
         if (resultCode == RESULT_OK && data != null) {
             CaptureService.start(this, resultCode, data)
-            // Один раз на очках: разрешение «Доступ к истории использования» — чтобы учитель видел, в каком приложении ученик.
-            if (!AppWatcher.checkAccess(this)) openUsageAccessSettings()
+            when {
+                autoMode -> {}
+                // Один раз на очках: «Доступ к истории использования» — чтобы учитель видел, в каком приложении ученик.
+                !AppWatcher.checkAccess(this) && askOnce("usage") -> { openUsageAccessSettings(); return }
+                // Один раз на очках: «Mostrar sobre otras apps» — чтобы после сна окно подтверждения открывалось само.
+                !AutoStart.canOpenWindow(this) && askOnce("overlay") -> { openOverlaySettings(); return }
+            }
+            // Стрим идёт в фоне — закрываем окно, чтобы не мешало.
+            finish()
+            return
         } else {
             StreamState.status = StreamState.Status.ERROR
             StreamState.errorText = "Permiso denegado"
@@ -127,6 +162,23 @@ class MainActivity : Activity() {
     }
 
     private var usageAccessMissing = false
+    private var overlayMissing = false
+
+    /** Экран настроек каждого разрешения открываем сами только один раз на очках (если HMS его не даёт — не надоедаем). */
+    private fun askOnce(what: String): Boolean {
+        val prefs = getSharedPreferences("orikly", MODE_PRIVATE)
+        if (prefs.getBoolean("asked_$what", false)) return false
+        prefs.edit().putBoolean("asked_$what", true).apply()
+        return true
+    }
+
+    private fun openOverlaySettings() {
+        val action = android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION
+        for (i in listOf(Intent(action, android.net.Uri.parse("package:$packageName")), Intent(action))) {
+            if (runCatching { startActivity(i) }.isSuccess) return
+        }
+        overlayMissing = true
+    }
 
     private fun refresh() {
         nameView.text = DeviceInfo.name(this)
@@ -162,6 +214,8 @@ class MainActivity : Activity() {
                     usageAccessMissing -> "Acceso de uso: no disponible en este dispositivo"
                     else -> "Acceso de uso: no concedido (se pedirá al pulsar «Iniciar»)"
                 } +
+                "\nAutoinicio tras reposo: " +
+                (if (AutoStart.canOpenWindow(this)) "ventana automática" else "notificación (permiso «Mostrar sobre otras apps» no concedido)") +
                 "\nN.º de serie: " + DeviceInfo.serials.entries.joinToString(" · ") { "${it.key}=${it.value}" }
         )
         button.text = if (st.status == StreamState.Status.RUNNING) "Detener transmisión" else "Iniciar transmisión"
