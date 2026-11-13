@@ -28,7 +28,7 @@ import android.util.Log
  * и после выхода из сна — полностью заново: новое разрешение на захват, новый кодировщик, новое соединение.
  * Без единого нажатия на очках.
  *
- * Работает только после трёх ADB-команд (один раз на каждых очках):
+ * Работает только после ADB-команд (один раз на каждых очках):
  *   appops set org.orikly.queststream PROJECT_MEDIA allow        — захват экрана без окна «Empezar»
  *   appops set org.orikly.queststream SYSTEM_ALERT_WINDOW allow  — приложению можно открыть окно из фона
  *   dumpsys deviceidle whitelist +org.orikly.queststream        — система не усыпляет приложение
@@ -58,8 +58,14 @@ object AutoRestart {
             .unsafeCheckOpNoThrow("android:project_media", Process.myUid(), ctx.packageName) == AppOpsManager.MODE_ALLOWED
     }.getOrDefault(false)
 
-    /** ADB 2: открыть окно из фона (без этого Android не даст начать захват, пока приложение закрыто). */
-    fun hasWindowGrant(ctx: Context) = runCatching { Settings.canDrawOverlays(ctx) }.getOrDefault(false)
+    /**
+     * ADB 2: открыть окно из фона (без этого Android не даст начать захват, пока приложение закрыто).
+     * С 0.5.4 разрешения SYSTEM_ALERT_WINDOW в манифесте нет (HMS не принимает) — смотрим прямо appop.
+     */
+    fun hasWindowGrant(ctx: Context): Boolean = runCatching {
+        ctx.getSystemService(AppOpsManager::class.java)
+            .unsafeCheckOpNoThrow("android:system_alert_window", Process.myUid(), ctx.packageName) == AppOpsManager.MODE_ALLOWED
+    }.getOrDefault(false) || runCatching { Settings.canDrawOverlays(ctx) }.getOrDefault(false)
 
     /** ADB 3: приложение не усыпляется системой. */
     fun hasBatteryGrant(ctx: Context) = runCatching {

@@ -12,13 +12,22 @@
     <!-- Автоперезапуск после включения, обновления и сна (AutoRestart.kt). Сами разрешения выдаются ADB-командами. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <!-- В каком приложении ученик: «Доступ к истории использования», включается вручную в настройках. -->
-    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
-        tools:ignore="ProtectedPermissions" />
-    <!-- Названия других приложений (Android 11+ иначе их не показывает). -->
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="QueryAllPackagesPermission" />
+    <!--
+        HMS (загрузка файлом) не принимает SYSTEM_ALERT_WINDOW, PACKAGE_USAGE_STATS и QUERY_ALL_PACKAGES (0.5.4).
+        Окно из фона и история использования выдаются ADB-командами (appops) — им запись в манифесте не нужна.
+    -->
+
+    <!-- Названия и значки других приложений (Android 11+ иначе их не показывает): только приложения со значком запуска. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="com.oculus.intent.category.VR" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="false"

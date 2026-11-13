@@ -110,28 +110,12 @@ class MainActivity : Activity() {
         if (resultCode == RESULT_OK && data != null) {
             CaptureService.start(this, resultCode, data)
             WakeService.start(this)
-            // Один раз на очках: разрешение «Доступ к истории использования» — чтобы учитель видел, в каком приложении ученик.
-            if (!AppWatcher.checkAccess(this)) openUsageAccessSettings()
         } else {
             StreamState.status = StreamState.Status.ERROR
             StreamState.errorText = "Permiso denegado"
         }
         refresh()
     }
-
-    private fun openUsageAccessSettings() {
-        val action = android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS
-        val tries = listOf(
-            Intent(action, android.net.Uri.parse("package:$packageName")), // сразу наше приложение (Android 10+)
-            Intent(action),
-        )
-        for (i in tries) {
-            if (runCatching { startActivity(i) }.isSuccess) return
-        }
-        usageAccessMissing = true
-    }
-
-    private var usageAccessMissing = false
 
     private fun refresh() {
         nameView.text = DeviceInfo.name(this)
@@ -166,8 +150,7 @@ class MainActivity : Activity() {
             (if (diagView.text.isEmpty()) "" else "\n") +
                 when {
                     AppWatcher.checkAccess(this) -> "Aplicación: $app"
-                    usageAccessMissing -> "Acceso de uso: no disponible en este dispositivo"
-                    else -> "Acceso de uso: no concedido (se pedirá al pulsar «Iniciar»)"
+                    else -> "Acceso de uso: no concedido (ADB: appops set … GET_USAGE_STATS allow)"
                 } +
                 "\nReinicio automático (encendido / reposo): " + autoRestartText() +
                 "\nN.º de serie: " + DeviceInfo.serials.entries.joinToString(" · ") { "${it.key}=${it.value}" }
