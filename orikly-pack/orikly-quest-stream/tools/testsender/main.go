@@ -17,6 +17,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"math/rand"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -32,10 +33,12 @@ var (
 	keyFlag = flag.String("key", "", "access key (default: from orikly-server.json next to this program)")
 	quality = flag.Int("q", 60, "JPEG quality")
 	// Load test: several fake headsets with a fixed total traffic, sending without waiting for Start.
-	count   = flag.Int("count", 1, "load test: number of fake headsets")
-	mbit    = flag.Float64("mbit", 0, "load test: total traffic in Mbit/s (e.g. 14); 0 = normal mode (like one headset, waits for Start)")
-	loadFps = flag.Int("fps", 24, "load test: frames per second per fake headset")
-	codecFl = flag.String("codec", "h264", "normal mode: h264 (like app 0.5.0+) or jpeg (older app)")
+	count    = flag.Int("count", 1, "load test: number of fake headsets")
+	mbit     = flag.Float64("mbit", 0, "load test: total traffic in Mbit/s (e.g. 14); 0 = normal mode (like one headset, waits for Start)")
+	loadFps  = flag.Int("fps", 24, "load test: frames per second per fake headset")
+	codecFl  = flag.String("codec", "h264", "normal mode: h264 (like app 0.5.0+) or jpeg (older app)")
+	cfID     = flag.String("cf-id", os.Getenv("CF_ACCESS_CLIENT_ID"), "Cloudflare Access service token Client ID (default: env CF_ACCESS_CLIENT_ID)")
+	cfSecret = flag.String("cf-secret", os.Getenv("CF_ACCESS_CLIENT_SECRET"), "Cloudflare Access service token Client Secret (default: env CF_ACCESS_CLIENT_SECRET)")
 )
 
 // Load test: prepared frames (a real JPEG padded to the needed size) and shared statistics.
@@ -210,7 +213,13 @@ func main() {
 }
 
 func run(u, host string, idx int) error {
-	c, resp, err := websocket.DefaultDialer.Dial(u, nil)
+	// Cloudflare Access pass, like the headset app 0.5.3+ sends it.
+	hdr := http.Header{}
+	if *cfID != "" && *cfSecret != "" {
+		hdr.Set("CF-Access-Client-Id", *cfID)
+		hdr.Set("CF-Access-Client-Secret", *cfSecret)
+	}
+	c, resp, err := websocket.DefaultDialer.Dial(u, hdr)
 	if err != nil {
 		if resp != nil {
 			return fmt.Errorf("%v (HTTP %d: 403 = wrong key, 502 = server not running, 530 = tunnel down)", err, resp.StatusCode)

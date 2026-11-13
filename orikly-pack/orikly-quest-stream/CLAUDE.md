@@ -118,7 +118,7 @@
 
 ## Репозиторий и сборка
 
-- GitHub-репозиторий Paul: **`orikly_stream`**, **публичный** (иначе HMS не скачает APK).
+- GitHub-репозиторий Paul: **`orikly_stream`**. С 0.5.3 — **приватный** (решение Paul): HMS принимает сам файл APK, Paul скачивает его из Releases (с входом в GitHub) и загружает в HMS вручную. Постоянная ссылка `releases/latest/download/...` для HMS больше не работает. Для работы Claude с репозиторием в новых сессиях нужен подключённый к Claude аккаунт GitHub.
 - Структура репозитория (проект **в подпапке**, не в корне):
   ```
   .github/workflows/build.yml          ← файл сборки, обязательно в корне
@@ -127,7 +127,7 @@
   В корне также лежат лишние `build.yml`, `orikly-pack.zip`, в `orikly-pack/` — `build.yml`, `ИНСТРУКЦИЯ.md`: сборке не мешают.
 - `build.yml`: `defaults.run.working-directory: orikly-pack/orikly-quest-stream`; Java 17; `bash ./gradlew assembleRelease` (через `bash`, т.к. при загрузке через сайт теряется право на запуск `gradlew`); Go → `orikly-server.exe` + `orikly-server-mac.zip` (через `fatmacho.py`); Release с тремя файлами: `orikly-quest-stream.apk`, `orikly-server.exe`, `orikly-server-mac.zip`.
 - Сборка: **Actions → Build APK → Run workflow → версия** (например `0.3.7`) → создаётся Release `v0.3.7`. `versionCode` = номер запуска.
-- Секреты GitHub: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS` (`orikly`), `KEY_PASSWORD`, `STREAM_KEY`, `RELAY_URL` = `wss://stream.orikly.org/push`. Keystore Paul создал сам на Mac и хранит у себя — **терять нельзя**, иначе HMS не обновит приложение.
+- Секреты GitHub: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS` (`orikly`), `KEY_PASSWORD`, `STREAM_KEY`, `RELAY_URL` = `wss://stream.orikly.org/push`, с 0.5.3 — `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET` (пропуск Cloudflare Access; без них сборка проходит с предупреждением, APK без пропуска). Keystore Paul создал сам на Mac и хранит у себя — **терять нельзя**, иначе HMS не обновит приложение.
 - Ссылка для HMS (постоянная): `https://github.com/<логин>/orikly_stream/releases/latest/download/orikly-quest-stream.apk`.
 - После обновления APK — на каждых очках один раз «Iniciar transmisión». С 0.5.1 при выданных ADB-разрешениях — само (MY_PACKAGE_REPLACED), не проверено.
 - Значок для HMS: PNG 512×512, белый фон, синяя надпись «stream» (уже сделан). На самих очках — системная иконка.
@@ -142,7 +142,7 @@
 - 0.3.6 — eco. **В GitHub не попал, Paul от eco отказался.** 0.3.5 в GitHub тоже не попал.
 - 0.4.4 — так Paul назвал сборку кода 0.3.4; стоит на очках.
 - Следующая (≥0.4.5): диагностика кадров (очки + страница), разворот без обрезки, QuickEdit/асинхронный лог (повторно 0.3.5). Проверено: компиляция Kotlin против android-all, сервер с «поддельными очками» + Chromium. На очках не проверено.
-- 0.4.13 — автозапуск с окном «Empezar» (откачен, см. H.264). 0.5.0 — H.264 (стоит на очках, работает). 0.5.1 — автоперезапуск по ADB без касаний.
+- 0.4.13 — автозапуск с окном «Empezar» (откачен, см. H.264). 0.5.0 — H.264 (стоит на очках, работает). 0.5.1 — автоперезапуск по ADB без касаний. 0.5.2 — «Detener» не выключает автоперезапуск (лагов после этого гораздо меньше, по словам Paul). 0.5.3 — пропуск Cloudflare Access, причина отказа на экране очков.
 
 ---
 
@@ -151,8 +151,12 @@
 - Аккаунт Cloudflare ассоциации (`Office@orikly.org`). DNS домена `orikly.org` перенесён в Cloudflare (сайт и почта ассоциации — в тех же DNS-записях, **их не трогать**).
 - Туннель (cloudflared), маршрут — **Published application**: `stream.orikly.org` → **`http://127.0.0.1:8090`** (тип **HTTP**).
 - Почему public, а не private hostname: private требует WARP + вход в Zero Trust на каждых очках — на Quest под HMS нереально. Снаружи доступен только `/push` с ключом.
-- **Отложенное решение Paul:** Cloudflare Access + Service Token. «Пропуск» (`CF-Access-Client-Id` / `CF-Access-Client-Secret`) зашивается в APK как ключ (секреты GitHub), очки шлют его в заголовках. Посторонние запросы отсекаются на стороне Cloudflare и **до ноутбука не доходят** — это главное. Делать, когда всё заработает.
-- Проверка туннеля: при запущенной программе `https://stream.orikly.org/push` → **`forbidden`** = всё работает.
+- **Cloudflare Access + Service Token (0.5.3, решение Paul):** «пропуск» (`CF-Access-Client-Id` / `CF-Access-Client-Secret`) зашит в APK (секреты GitHub → `BuildConfig`), очки шлют его в заголовках при каждом подключении (`RelayClient.request()`). Политика Access на `stream.orikly.org` — действие **Service Auth**, Include → Service Token. Посторонние отсекаются в Cloudflare и **до ноутбука не доходят**. `STREAM_KEY` в адресе остаётся вторым замком на сервере. Сервер не менялся.
+  - **Порядок включения:** приватный репозиторий → секреты → сборка 0.5.3 → все очки обновлены и работают (на экране «pase de Cloudflare: sí») → только потом политика в Cloudflare. Иначе старые очки отвалятся.
+  - Экран очков: «Servidor: conectando… · último error: …» — `403: el servidor rechazó la clave` (ответ сервера ровно `forbidden`), `403: Cloudflare rechazó el pase`, `3xx: …Service Auth` (политика не того типа), `502/530` (сервер не запущен / туннель). Проверено на модели (OkHttp против поддельных серверов), на очках — нет.
+  - Сквозное шифрование «очки → сервер» (чтобы и Cloudflare видел только шифр) обсуждали — Paul решил не делать: Cloudflare доверен (домен, DNS, туннель). Не предлагать, пока не попросит.
+  - `orikly-testsender` через туннель: флаги `-cf-id` / `-cf-secret` (или переменные окружения `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`).
+- Проверка туннеля: при запущенной программе `https://stream.orikly.org/push` → **`forbidden`** = всё работает. После включения Access браузер вместо этого видит страницу Cloudflare (403) — это правильно: без пропуска не пускает.
 
 ### Грабли Cloudflare, на которые уже наступили
 
@@ -225,7 +229,6 @@
 
 - **H.264** (MediaCodec на очках → WebSocket → WebCodecs/MSE в браузере) вместо JPEG: в 5–10 раз меньше трафика при том же качестве. Главный рычаг, если канала не хватает. Большая переделка всех трёх частей.
 - Кнопка «чёткий снимок» в развёрнутом виде (один кадр в полном разрешении, JPEG ~90).
-- Cloudflare Access + Service Token (см. выше).
 - Ограничение: программа при каждом запуске открывает новую вкладку Chrome — сделать проверку «страница уже открыта» и баннер «Приоритет: развёрнуты очки X», если где-то включён разворот.
 - Автопоиск очков (mDNS), учёт аккаунтов учеников — не нужно сейчас.
 

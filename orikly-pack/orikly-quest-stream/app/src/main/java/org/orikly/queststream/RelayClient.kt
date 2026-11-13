@@ -97,6 +97,30 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             .onFailure { Log.w(TAG, "network callback", it) }
     }
 
+    /**
+     * Запрос подключения. Пропуск Cloudflare Access — два заголовка: Cloudflare проверяет их до туннеля,
+     * без них запрос до ноутбука не доходит. Ключ STREAM_KEY в адресе остаётся вторым замком (проверяет сервер).
+     */
+    private fun request(): Request = Request.Builder().url(fullUrl).apply {
+        if (hasAccessPass()) {
+            header("CF-Access-Client-Id", BuildConfig.CF_ACCESS_CLIENT_ID)
+            header("CF-Access-Client-Secret", BuildConfig.CF_ACCESS_CLIENT_SECRET)
+        }
+    }.build()
+
+    /** Кто не пустил: сервер отвечает на неверный ключ ровно «forbidden», у Cloudflare — своя страница. */
+    private fun failureText(t: Throwable, response: Response?): String {
+        val code = response?.code ?: return "sin conexión (${t.message ?: t.javaClass.simpleName})"
+        val body = runCatching { response.peekBody(512).string().trim() }.getOrDefault("")
+        return when {
+            code == 403 && body == "forbidden" -> "403: el servidor rechazó la clave (STREAM_KEY)"
+            code == 403 -> "403: Cloudflare rechazó el pase (CF_ACCESS)"
+            code in 300..399 -> "$code: Cloudflare pide iniciar sesión (la política debe ser «Service Auth»)"
+            code == 502 || code == 530 -> "$code: el servidor del portátil no está en marcha o el túnel está caído"
+            else -> "HTTP $code"
+        }
+    }
+
     /** Что просит ноутбук: при изменении включаем / пересобираем кодировщик. */
     private fun setWant(on: Boolean, hq: Boolean, fps: Int) {
         val changed = on != StreamState.relayWant || hq != StreamState.relayHq || fps != StreamState.targetFps
@@ -114,9 +138,10 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             val opened = CountDownLatch(1)
             val closed = CountDownLatch(1)
             var ok = false
-            val ws = client.newWebSocket(Request.Builder().url(fullUrl).build(), object : WebSocketListener() {
+            val ws = client.newWebSocket(request(), object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     ok = true
+                    StreamState.relayError = null
                     opened.countDown()
                 }
 
@@ -159,6 +184,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     Log.i(TAG, "relay failure: ${t.message} ${response?.code}")
+                    StreamState.relayError = failureText(t, response)
                     opened.countDown(); closed.countDown()
                 }
             })
@@ -342,6 +368,8 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
     }
 
     companion object {
+        fun hasAccessPass() = BuildConfig.CF_ACCESS_CLIENT_ID.isNotBlank() && BuildConfig.CF_ACCESS_CLIENT_SECRET.isNotBlank()
+
         private const val TAG = "OriklyRelay"
         private const val MIN_IN_FLIGHT = 3
         private const val MAX_IN_FLIGHT = 16

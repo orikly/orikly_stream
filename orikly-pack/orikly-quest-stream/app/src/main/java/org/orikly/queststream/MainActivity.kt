@@ -53,7 +53,8 @@ class MainActivity : Activity() {
                 "Después puedes salir de esta app: la transmisión sigue en segundo plano."
         }
         val keyView = text(14f).apply {
-            text = "Clave de acceso: incluida en la app · versión ${BuildConfig.VERSION_NAME}"
+            text = "Clave de acceso: incluida en la app · pase de Cloudflare: " +
+                (if (RelayClient.hasAccessPass()) "sí" else "no") + " · versión ${BuildConfig.VERSION_NAME}"
             alpha = 0.6f
         }
 
@@ -139,7 +140,7 @@ class MainActivity : Activity() {
         if (BuildConfig.RELAY_URL.isNotBlank()) {
             val relay = when (StreamState.relayState) {
                 "connected" -> if (StreamState.relayWant) "conectado · enviando" else "conectado"
-                "connecting", "reconnecting" -> "conectando…"
+                "connecting", "reconnecting" -> "conectando…" + (StreamState.relayError?.let { " · último error: $it" } ?: "")
                 else -> "inactivo"
             }
             addressView.append("\nServidor: $relay")

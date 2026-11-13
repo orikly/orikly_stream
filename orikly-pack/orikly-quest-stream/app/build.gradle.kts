@@ -23,6 +23,9 @@ android {
         // Адрес сервера на ноутбуке через интернет, например wss://stream.example.org/push. Пусто — только локальная сеть.
         val relayUrl = env("RELAY_URL") ?: ""
         buildConfigField("String", "RELAY_URL", "\"$relayUrl\"")
+        // Пропуск Cloudflare Access (сервисный токен): без него Cloudflare не пускает очки к ноутбуку. Пусто — без пропуска.
+        buildConfigField("String", "CF_ACCESS_CLIENT_ID", "\"${env("CF_ACCESS_CLIENT_ID") ?: ""}\"")
+        buildConfigField("String", "CF_ACCESS_CLIENT_SECRET", "\"${env("CF_ACCESS_CLIENT_SECRET") ?: ""}\"")
     }
 
     signingConfigs {
