@@ -38,8 +38,6 @@ import android.util.Log
  */
 object AutoRestart {
     private const val TAG = "OriklyAuto"
-    private const val PREFS = "orikly"
-    private const val KEY_ENABLED = "auto_restart"
 
     /** Экран был выключен хотя бы столько — это сон, перезапускаем. Короче — очки просто поправили. */
     const val SLEEP_MIN_MS = 10_000L
@@ -53,12 +51,6 @@ object AutoRestart {
     @Volatile private var lastRequestAt = 0L
     /** Для экрана приложения: когда и почему был последний автоперезапуск. */
     @Volatile var lastInfo = ""
-
-    /** Выключается кнопкой «Detener» на очках, включается снова кнопкой «Iniciar». По умолчанию включено. */
-    fun isEnabled(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ENABLED, true)
-
-    fun setEnabled(ctx: Context, on: Boolean) =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ENABLED, on).apply()
 
     /** ADB 1: захват без окна подтверждения. */
     fun hasCaptureGrant(ctx: Context): Boolean = runCatching {
@@ -74,14 +66,13 @@ object AutoRestart {
         ctx.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
     }.getOrDefault(false)
 
-    fun hasGrants(ctx: Context) = hasCaptureGrant(ctx) && hasWindowGrant(ctx)
-
-    fun ready(ctx: Context) = isEnabled(ctx) && hasGrants(ctx)
+    /** Работает всегда, когда есть ADB-разрешения (кнопка «Detener» его не выключает — решение Paul, 0.5.2). */
+    fun ready(ctx: Context) = hasCaptureGrant(ctx) && hasWindowGrant(ctx)
 
     /** Полный перезапуск стрима: новое разрешение на захват → CaptureService начинает всё заново. */
     fun request(ctx: Context, reason: String) {
         if (!ready(ctx)) {
-            Log.i(TAG, "restart ($reason) skipped: enabled=${isEnabled(ctx)} capture=${hasCaptureGrant(ctx)} window=${hasWindowGrant(ctx)}")
+            Log.i(TAG, "restart ($reason) skipped: capture=${hasCaptureGrant(ctx)} window=${hasWindowGrant(ctx)}")
             return
         }
         val now = SystemClock.elapsedRealtime()
