@@ -79,6 +79,8 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // Служба автоперезапуска (если ADB-разрешения уже выданы): ждёт выхода очков из сна.
+        WakeService.start(this)
         ui.post(refresher)
     }
 
@@ -89,6 +91,9 @@ class MainActivity : Activity() {
 
     private fun onButton() {
         if (StreamState.status == StreamState.Status.RUNNING) {
+            // Остановили руками на очках — сами не перезапускаемся, пока снова не нажмут «Iniciar».
+            AutoRestart.setEnabled(this, false)
+            WakeService.stop(this)
             CaptureService.stop(this)
         } else {
             // Каждый раз новое согласие: токен MediaProjection одноразовый.
@@ -105,6 +110,8 @@ class MainActivity : Activity() {
         if (requestCode != REQ_CAPTURE) return
         if (resultCode == RESULT_OK && data != null) {
             CaptureService.start(this, resultCode, data)
+            AutoRestart.setEnabled(this, true)
+            WakeService.start(this)
             // Один раз на очках: разрешение «Доступ к истории использования» — чтобы учитель видел, в каком приложении ученик.
             if (!AppWatcher.checkAccess(this)) openUsageAccessSettings()
         } else {
@@ -164,9 +171,25 @@ class MainActivity : Activity() {
                     usageAccessMissing -> "Acceso de uso: no disponible en este dispositivo"
                     else -> "Acceso de uso: no concedido (se pedirá al pulsar «Iniciar»)"
                 } +
+                "\nReinicio automático (encendido / reposo): " + autoRestartText() +
                 "\nN.º de serie: " + DeviceInfo.serials.entries.joinToString(" · ") { "${it.key}=${it.value}" }
         )
         button.text = if (st.status == StreamState.Status.RUNNING) "Detener transmisión" else "Iniciar transmisión"
+    }
+
+    /** Работает ли автоперезапуск; если нет — какой ADB-команды не хватает. */
+    private fun autoRestartText(): String {
+        val missing = buildList {
+            if (!AutoRestart.hasCaptureGrant(this@MainActivity)) add("PROJECT_MEDIA")
+            if (!AutoRestart.hasWindowGrant(this@MainActivity)) add("SYSTEM_ALERT_WINDOW")
+        }
+        val battery = if (AutoRestart.hasBatteryGrant(this)) "" else " · falta deviceidle (ADB)"
+        val last = AutoRestart.lastInfo.let { if (it.isEmpty()) "" else " · último: $it" }
+        return when {
+            missing.isNotEmpty() -> "no — falta permiso ADB: " + missing.joinToString(", ") + battery
+            !AutoRestart.isEnabled(this) -> "pausado (se pulsó «Detener»; se reactiva con «Iniciar»)"
+            else -> "activo$battery$last"
+        }
     }
 
     companion object {

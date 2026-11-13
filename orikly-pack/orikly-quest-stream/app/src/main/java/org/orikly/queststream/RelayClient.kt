@@ -1,6 +1,8 @@
 package org.orikly.queststream
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -53,8 +55,14 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
     // Отклики за последние RTT_WINDOW_MS: самый маленький — «чистое» время пути без очереди.
     private val rttSamples = ArrayDeque<Pair<Long, Long>>()
 
+    // Сеть появилась (после сна / включения очков): подключаемся сразу, без паузы между попытками.
+    private val netLock = Object()
+    private var netAppeared = false
+    private var netCallback: ConnectivityManager.NetworkCallback? = null
+
     fun start() {
         running = true
+        watchNetwork()
         loop = thread(name = "relay", isDaemon = true) {
             try {
                 run()
@@ -66,12 +74,27 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
 
     fun stop() {
         running = false
+        netCallback?.let { cb ->
+            runCatching { ctx.getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(cb) }
+        }
+        netCallback = null
         socket?.close(1001, "stop")
         socket = null
         loop?.interrupt()
         loop = null
         setWant(on = false, hq = false, fps = StreamState.TARGET_FPS)
         StreamState.relayState = "off"
+    }
+
+    private fun watchNetwork() {
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                synchronized(netLock) { netAppeared = true; netLock.notifyAll() }
+            }
+        }
+        runCatching { ctx.getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(cb) }
+            .onSuccess { netCallback = cb }
+            .onFailure { Log.w(TAG, "network callback", it) }
     }
 
     /** Что просит ноутбук: при изменении включаем / пересобираем кодировщик. */
@@ -87,6 +110,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
         var backoff = 2000L
         while (running) {
             StreamState.relayState = "connecting"
+            synchronized(netLock) { netAppeared = false }
             val opened = CountDownLatch(1)
             val closed = CountDownLatch(1)
             var ok = false
@@ -159,8 +183,11 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
             setWant(on = false, hq = false, fps = StreamState.TARGET_FPS)
             if (!running) break
             StreamState.relayState = "reconnecting"
-            Thread.sleep(backoff)
-            backoff = minOf(backoff * 2, 30_000L)
+            val appeared = synchronized(netLock) {
+                if (!netAppeared) netLock.wait(backoff)
+                netAppeared
+            }
+            backoff = if (appeared) 2000L else minOf(backoff * 2, 30_000L)
         }
     }
 

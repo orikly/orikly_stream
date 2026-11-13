@@ -78,7 +78,13 @@ class CaptureService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         )
 
-        if (projection != null) return // уже идёт
+        if (projection != null) {
+            // Автоперезапуск (AutoRestart.kt): пришло новое разрешение — закрываем старое соединение,
+            // захват и кодировщик и начинаем всё заново.
+            Log.i(TAG, "restart: new capture permission")
+            releaseAll()
+        }
+        getSystemService(NotificationManager::class.java).cancel(NOTIF_STOPPED_ID)
         if (code != Activity.RESULT_OK || data == null) {
             fail("Permiso denegado")
             return
