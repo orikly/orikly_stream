@@ -47,27 +47,25 @@ class MainActivity : Activity() {
             textSize = 22f
             setOnClickListener { onButton() }
         }
-        val hint = text(16f).apply {
-            text = "En la ventana del sistema elige «Pantalla completa» " +
-                "(no «Una sola aplicación») y pulsa «Empezar».\n" +
-                "Después puedes salir de esta app: la transmisión sigue en segundo plano."
-        }
+        // Подсказку про «Pantalla completa / Empezar» убрали (0.5.7): с ADB PROJECT_MEDIA окна выбора нет.
         val keyView = text(14f).apply {
             text = "Clave de acceso: incluida en la app · versión ${BuildConfig.VERSION_NAME}"
             alpha = 0.6f
         }
 
-        setContentView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(pad, pad, pad, pad)
-            addView(nameView)
-            addView(addressView)
-            addView(statusView)
-            addView(diagView)
-            addView(button)
-            addView(hint)
-            addView(keyView)
+        // Версия — сразу под именем, кнопка — до длинной диагностики; всё прокручивается, ничего не обрезается.
+        setContentView(android.widget.ScrollView(this).apply {
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(pad, pad, pad, pad)
+                addView(nameView)
+                addView(keyView)
+                addView(addressView)
+                addView(statusView)
+                addView(button)
+                addView(diagView)
+            })
         })
 
         if (Build.VERSION.SDK_INT >= 33 &&
