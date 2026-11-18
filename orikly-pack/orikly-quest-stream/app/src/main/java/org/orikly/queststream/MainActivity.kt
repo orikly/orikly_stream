@@ -167,23 +167,9 @@ class MainActivity : Activity() {
                     else -> "Acceso de uso: no concedido (se pedirá al pulsar «Iniciar»)"
                 } +
                 "\nReinicio automático (encendido / reposo): " + autoRestartText() +
-                "\nBloqueo de apps: " + appLockText() +
                 "\nN.º de serie: " + DeviceInfo.serials.entries.joinToString(" · ") { "${it.key}=${it.value}" }
         )
         button.text = if (st.status == StreamState.Status.RUNNING) "Detener transmisión" else "Iniciar transmisión"
-    }
-
-    /** Блокировка магазина / браузера паролем: работает ли и чего не хватает. */
-    private fun appLockText(): String {
-        if (!AppLock.hasPassword()) return "no — la app se compiló sin contraseña (APP_LOCK_PASSWORD)"
-        val missing = buildList {
-            if (!AppWatcher.checkAccess(this@MainActivity)) add("GET_USAGE_STATS")
-            if (!AutoRestart.hasWindowGrant(this@MainActivity)) add("SYSTEM_ALERT_WINDOW")
-        }
-        val apps = AppLock.LOCKED.joinToString(", ") { AppLock.label(this, it) }
-        val close = if (AppLock.accessibility != null) "cierre automático: sí" else "cierre automático: no (accesibilidad sin activar, ADB)"
-        return if (missing.isNotEmpty()) "no — falta permiso ADB: " + missing.joinToString(", ")
-        else "activo ($apps) · $close"
     }
 
     /** Работает ли автоперезапуск; если нет — какой ADB-команды не хватает. */

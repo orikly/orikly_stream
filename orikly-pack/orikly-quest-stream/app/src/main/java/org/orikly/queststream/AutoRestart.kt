@@ -141,15 +141,14 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_MY_PACKAGE_REPLACED -> "actualización"
             else -> return
         }
-        WakeService.start(ctx, reason)
+        if (AutoRestart.ready(ctx)) WakeService.start(ctx, reason)
     }
 }
 
 /**
  * Ждёт выхода очков из сна. Событие «экран включился» Android присылает только работающему приложению,
- * поэтому служба держится всё время. При включении экрана после сна — полный перезапуск стрима;
- * если стрим слетел — тоже. С 0.5.5 здесь же охранник запретных приложений (AppLock.kt): опрос раз в 0,4 с.
- * Работает, пока есть ADB SYSTEM_ALERT_WINDOW (нужен и перезапуску, и окну пароля).
+ * поэтому служба держится всё время (своей работы у неё нет). При включении экрана после сна —
+ * полный перезапуск стрима; если стрим слетел — тоже.
  */
 class WakeService : Service() {
     private val main = Handler(Looper.getMainLooper())
@@ -164,13 +163,6 @@ class WakeService : Service() {
         }
     }
 
-    private val lockPoll = object : Runnable {
-        override fun run() {
-            runCatching { AppLock.poll(this@WakeService) }.onFailure { Log.w("OriklyLock", "poll", it) }
-            main.postDelayed(this, AppLock.POLL_MS)
-        }
-    }
-
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             val now = SystemClock.elapsedRealtime()
@@ -178,7 +170,6 @@ class WakeService : Service() {
                 Intent.ACTION_SCREEN_OFF -> {
                     if (offSince == 0L) offSince = now
                     main.removeCallbacks(check)
-                    AppLock.relockAll() // после сна запретные приложения снова под паролем
                 }
                 Intent.ACTION_SCREEN_ON -> {
                     offMs = if (offSince > 0) now - offSince else 0
@@ -199,7 +190,7 @@ class WakeService : Service() {
         val n = Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.presence_video_online)
             .setContentTitle("Orikly Stream")
-            .setContentText(if (AppLock.configured()) "Reinicio automático y bloqueo de apps activos" else "Reinicio automático activo")
+            .setContentText("Reinicio automático activo")
             .setOngoing(true)
             .build()
         val started = runCatching {
@@ -219,11 +210,10 @@ class WakeService : Service() {
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         else registerReceiver(receiver, filter)
         registered = true
-        if (AppLock.configured()) main.post(lockPoll)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!AutoRestart.hasWindowGrant(this)) {
+        if (!AutoRestart.ready(this)) {
             stopSelf()
             return START_NOT_STICKY
         }
@@ -245,12 +235,9 @@ class WakeService : Service() {
         private const val NOTIF_ID = 3
         private const val EXTRA_REASON = "reason"
 
-        /**
-         * Запустить службу, если есть ADB SYSTEM_ALERT_WINDOW. [reason] — сразу запустить стрим
-         * (сам перезапуск ещё проверяет PROJECT_MEDIA в AutoRestart.request).
-         */
+        /** Запустить службу, если автоперезапуск включён и ADB-разрешения есть. [reason] — сразу запустить стрим. */
         fun start(ctx: Context, reason: String? = null) {
-            if (!AutoRestart.hasWindowGrant(ctx)) return
+            if (!AutoRestart.ready(ctx)) return
             val i = Intent(ctx, WakeService::class.java)
             if (reason != null) i.putExtra(EXTRA_REASON, reason)
             runCatching { ctx.startForegroundService(i) }

@@ -45,25 +45,6 @@
             android:taskAffinity="org.orikly.queststream.restart"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
-        <!-- Окно пароля поверх запретного приложения (AppLock.kt). -->
-        <activity
-            android:name=".LockActivity"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:launchMode="singleTask"
-            android:taskAffinity="org.orikly.queststream.lock" />
-
-        <!-- Закрывает магазин / браузер «Назад», пока не введён пароль. Включается ADB-командой. -->
-        <service
-            android:name=".LockAccessibilityService"
-            android:exported="true"
-            android:label="Orikly Stream: bloqueo de apps"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-        </service>
-
         <receiver
             android:name=".BootReceiver"
             android:exported="true">
