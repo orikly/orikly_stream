@@ -12,22 +12,13 @@
     <!-- Автоперезапуск после включения, обновления и сна (AutoRestart.kt). Сами разрешения выдаются ADB-командами. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <!--
-        HMS (загрузка файлом) не принимает SYSTEM_ALERT_WINDOW, PACKAGE_USAGE_STATS и QUERY_ALL_PACKAGES (0.5.4).
-        Окно из фона и история использования выдаются ADB-командами (appops) — им запись в манифесте не нужна.
-    -->
-
-    <!-- Названия и значки других приложений (Android 11+ иначе их не показывает): только приложения со значком запуска. -->
-    <queries>
-        <intent>
-            <action android:name="android.intent.action.MAIN" />
-            <category android:name="android.intent.category.LAUNCHER" />
-        </intent>
-        <intent>
-            <action android:name="android.intent.action.MAIN" />
-            <category android:name="com.oculus.intent.category.VR" />
-        </intent>
-    </queries>
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- В каком приложении ученик: «Доступ к истории использования», включается вручную в настройках. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <!-- Названия других приложений (Android 11+ иначе их не показывает). -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
 
     <application
         android:allowBackup="false"
@@ -53,6 +44,25 @@
             android:launchMode="singleTask"
             android:taskAffinity="org.orikly.queststream.restart"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- Окно пароля поверх запретного приложения (AppLock.kt). -->
+        <activity
+            android:name=".LockActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="org.orikly.queststream.lock" />
+
+        <!-- Закрывает магазин / браузер «Назад», пока не введён пароль. Включается ADB-командой. -->
+        <service
+            android:name=".LockAccessibilityService"
+            android:exported="true"
+            android:label="Orikly Stream: bloqueo de apps"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+        </service>
 
         <receiver
             android:name=".BootReceiver"

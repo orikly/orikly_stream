@@ -53,8 +53,7 @@ class MainActivity : Activity() {
                 "Después puedes salir de esta app: la transmisión sigue en segundo plano."
         }
         val keyView = text(14f).apply {
-            text = "Clave de acceso: incluida en la app · pase de Cloudflare: " +
-                (if (RelayClient.hasAccessPass()) "sí" else "no") + " · versión ${BuildConfig.VERSION_NAME}"
+            text = "Clave de acceso: incluida en la app · versión ${BuildConfig.VERSION_NAME}"
             alpha = 0.6f
         }
 
@@ -110,12 +109,28 @@ class MainActivity : Activity() {
         if (resultCode == RESULT_OK && data != null) {
             CaptureService.start(this, resultCode, data)
             WakeService.start(this)
+            // Один раз на очках: разрешение «Доступ к истории использования» — чтобы учитель видел, в каком приложении ученик.
+            if (!AppWatcher.checkAccess(this)) openUsageAccessSettings()
         } else {
             StreamState.status = StreamState.Status.ERROR
             StreamState.errorText = "Permiso denegado"
         }
         refresh()
     }
+
+    private fun openUsageAccessSettings() {
+        val action = android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS
+        val tries = listOf(
+            Intent(action, android.net.Uri.parse("package:$packageName")), // сразу наше приложение (Android 10+)
+            Intent(action),
+        )
+        for (i in tries) {
+            if (runCatching { startActivity(i) }.isSuccess) return
+        }
+        usageAccessMissing = true
+    }
+
+    private var usageAccessMissing = false
 
     private fun refresh() {
         nameView.text = DeviceInfo.name(this)
@@ -124,7 +139,7 @@ class MainActivity : Activity() {
         if (BuildConfig.RELAY_URL.isNotBlank()) {
             val relay = when (StreamState.relayState) {
                 "connected" -> if (StreamState.relayWant) "conectado · enviando" else "conectado"
-                "connecting", "reconnecting" -> "conectando…" + (StreamState.relayError?.let { " · último error: $it" } ?: "")
+                "connecting", "reconnecting" -> "conectando…"
                 else -> "inactivo"
             }
             addressView.append("\nServidor: $relay")
@@ -150,12 +165,27 @@ class MainActivity : Activity() {
             (if (diagView.text.isEmpty()) "" else "\n") +
                 when {
                     AppWatcher.checkAccess(this) -> "Aplicación: $app"
-                    else -> "Acceso de uso: no concedido (ADB: appops set … GET_USAGE_STATS allow)"
+                    usageAccessMissing -> "Acceso de uso: no disponible en este dispositivo"
+                    else -> "Acceso de uso: no concedido (se pedirá al pulsar «Iniciar»)"
                 } +
                 "\nReinicio automático (encendido / reposo): " + autoRestartText() +
+                "\nBloqueo de apps: " + appLockText() +
                 "\nN.º de serie: " + DeviceInfo.serials.entries.joinToString(" · ") { "${it.key}=${it.value}" }
         )
         button.text = if (st.status == StreamState.Status.RUNNING) "Detener transmisión" else "Iniciar transmisión"
+    }
+
+    /** Блокировка магазина / браузера паролем: работает ли и чего не хватает. */
+    private fun appLockText(): String {
+        if (!AppLock.hasPassword()) return "no — la app se compiló sin contraseña (APP_LOCK_PASSWORD)"
+        val missing = buildList {
+            if (!AppWatcher.checkAccess(this@MainActivity)) add("GET_USAGE_STATS")
+            if (!AutoRestart.hasWindowGrant(this@MainActivity)) add("SYSTEM_ALERT_WINDOW")
+        }
+        val apps = AppLock.LOCKED.joinToString(", ") { AppLock.label(this, it) }
+        val close = if (AppLock.accessibility != null) "cierre automático: sí" else "cierre automático: no (accesibilidad sin activar, ADB)"
+        return if (missing.isNotEmpty()) "no — falta permiso ADB: " + missing.joinToString(", ")
+        else "activo ($apps) · $close"
     }
 
     /** Работает ли автоперезапуск; если нет — какой ADB-команды не хватает. */

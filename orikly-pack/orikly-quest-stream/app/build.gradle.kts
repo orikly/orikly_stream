@@ -7,6 +7,10 @@ plugins {
 // Локально без них собирается debug-подписанный APK с ключом "orikly".
 fun env(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() }
 
+// SHA-256 в виде hex — так же считает AppLock.sha256 в приложении.
+fun sha256(s: String): String = java.security.MessageDigest.getInstance("SHA-256")
+    .digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+
 android {
     namespace = "org.orikly.queststream"
     compileSdk = 35
@@ -23,9 +27,10 @@ android {
         // Адрес сервера на ноутбуке через интернет, например wss://stream.example.org/push. Пусто — только локальная сеть.
         val relayUrl = env("RELAY_URL") ?: ""
         buildConfigField("String", "RELAY_URL", "\"$relayUrl\"")
-        // Пропуск Cloudflare Access (сервисный токен): без него Cloudflare не пускает очки к ноутбуку. Пусто — без пропуска.
-        buildConfigField("String", "CF_ACCESS_CLIENT_ID", "\"${env("CF_ACCESS_CLIENT_ID") ?: ""}\"")
-        buildConfigField("String", "CF_ACCESS_CLIENT_SECRET", "\"${env("CF_ACCESS_CLIENT_SECRET") ?: ""}\"")
+        // Пароль блокировки магазина / браузера (AppLock.kt) из секрета APP_LOCK_PASSWORD: в APK — только хэш.
+        // Соль — как AppLock.SALT. Нет секрета — блокировка выключена.
+        val lockHash = env("APP_LOCK_PASSWORD")?.let { sha256("org.orikly.queststream:$it") } ?: ""
+        buildConfigField("String", "LOCK_PASSWORD_SHA256", "\"$lockHash\"")
     }
 
     signingConfigs {

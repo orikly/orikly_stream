@@ -37,8 +37,6 @@ object StreamState {
     @Volatile var relayWant = false
     @Volatile var relayHq = false
     @Volatile var relayState = "off"
-    /** Почему не подключились в последний раз (403 от сервера / от Cloudflare и т. п.); null — подключены. */
-    @Volatile var relayError: String? = null
     @Volatile var relaySentFps = 0.0
     /** Время «кадр ушёл → ноутбук подтвердил», мс. Растёт — значит, канал на пределе. */
     @Volatile var relayRttMs = 0L
