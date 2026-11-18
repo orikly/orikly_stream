@@ -1,3 +1,6 @@
+// Импорт явно: в файле сборки Gradle слово `java` означает настройки Java-плагина, а не пакет java.*.
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -8,7 +11,7 @@ plugins {
 fun env(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() }
 
 // SHA-256 в виде hex — так же считает AppLock.sha256 в приложении.
-fun sha256(s: String): String = java.security.MessageDigest.getInstance("SHA-256")
+fun sha256(s: String): String = MessageDigest.getInstance("SHA-256")
     .digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
 
 android {
