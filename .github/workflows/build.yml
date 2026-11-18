@@ -47,6 +47,7 @@ jobs:
           SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STREAM_KEY: ${{ secrets.STREAM_KEY }}
           RELAY_URL: ${{ secrets.RELAY_URL }}
+          APP_LOCK_PASSWORD: ${{ secrets.APP_LOCK_PASSWORD }}
           VERSION_CODE: ${{ github.run_number }}
           VERSION_NAME: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
         run: |
