@@ -815,8 +815,15 @@ async function voiceStart() {
     voice.stream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
-  } catch {
-    return voiceFail("No microphone: allow the microphone for this page (icon in the address bar)");
+  } catch (e) {
+    // Say the real reason: a cloud server (Azure) has no microphone at all — open the page on the laptop.
+    const why = {
+      NotFoundError: "No microphone on this computer. A cloud server has none: open this page on your laptop (Tailscale https address), or turn on microphone redirection in Remote Desktop.",
+      NotAllowedError: "Microphone blocked: allow it for this page (icon left of the address) and in the system privacy settings.",
+      NotReadableError: "Microphone busy or not working (another app is using it?).",
+      OverconstrainedError: "This microphone does not support the needed settings.",
+    }[e && e.name];
+    return voiceFail(why || "Cannot use the microphone: " + (e && (e.name + " " + e.message)));
   }
   try {
     const ctx = new AudioContext();
