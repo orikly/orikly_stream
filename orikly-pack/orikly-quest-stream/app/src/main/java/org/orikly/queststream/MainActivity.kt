@@ -167,9 +167,18 @@ class MainActivity : Activity() {
                     else -> "Acceso de uso: no concedido (se pedirá al pulsar «Iniciar»)"
                 } +
                 "\nReinicio automático (encendido / reposo): " + autoRestartText() +
+                "\nVoz del profesor: " + voiceText() +
                 "\nN.º de serie: " + DeviceInfo.serials.entries.joinToString(" · ") { "${it.key}=${it.value}" }
         )
         button.text = if (st.status == StreamState.Status.RUNNING) "Detener transmisión" else "Iniciar transmisión"
+    }
+
+    /** Голос учителя (VoicePlayer): когда звучал последний раз. */
+    private fun voiceText(): String {
+        val at = VoicePlayer.lastVoiceAt
+        if (at == 0L) return "—"
+        val s = (android.os.SystemClock.elapsedRealtime() - at) / 1000
+        return if (s < 2) "sonando ahora" else "hace $s s"
     }
 
     /** Работает ли автоперезапуск; если нет — какой ADB-команды не хватает. */

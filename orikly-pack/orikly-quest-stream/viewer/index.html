@@ -52,7 +52,11 @@ const CONFIG = {
   .tile.recording .rec { display: block; }
   .meta { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
   .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-  .name { font-weight: 600; }
+  .name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btns { display: flex; gap: 6px; flex-shrink: 0; }
+  button.voice.on { background: var(--ok); border-color: var(--ok); color: #fff; }
+  #voiceState { font-weight: 600; color: var(--ok); }
+  #voiceState.err { color: var(--bad); }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
   .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
   .info { font-size: 12px; }
@@ -108,6 +112,9 @@ const CONFIG = {
   <datalist id="appList"></datalist>
   <label id="fpsBox" title="Frames per second asked from every headset (headsets with app 0.4.6+)">FPS
     <select id="fpsSelect"><option>10</option><option>15</option><option>20</option><option>24</option></select></label>
+  <button id="voiceAll" title="Talk to every headset">Voice all</button>
+  <button id="voiceOff" title="Stop talking to all headsets">Voice off</button>
+  <span id="voiceState"></span>
   <label><input type="checkbox" id="recordToggle" checked> Record</label>
   <button id="pickFolder">Choose folder…</button>
   <span id="folderName" class="muted">No folder — recordings will download on stop</span>
@@ -195,7 +202,8 @@ class Tile {
         <div class="overlay">Idle</div><div class="rec">● REC</div><div class="hqbadge">HQ</div>
         <div class="grip" title="Drag to resize">⤢</div></div>
       <div class="meta">
-        <div class="row"><span class="name"></span><button class="toggle primary">Start</button></div>
+        <div class="row"><span class="name"></span>
+          <span class="btns"><button class="voice" title="Talk to this headset (laptop microphone)">Connect Voice</button><button class="toggle primary">Start</button></span></div>
         <div class="row info"><span class="state"><span class="dot"></span><span class="stext">Checking…</span></span>
           <span class="muted extra"></span></div>
         <div class="lessonline"></div>
@@ -218,6 +226,8 @@ class Tile {
     this.nameEl.style.cursor = "pointer";
     this.nameEl.onclick = () => renameTile(this);
     this.btn.onclick = () => (this.active ? this.stop() : this.start($("recordToggle").checked));
+    this.voiceBtn = this.el.querySelector(".voice");
+    this.voiceBtn.onclick = () => setVoice([this], !voice.targets.has(this.dev.id));
     hqWindowControls(this);
     this.blank();
   }
@@ -230,6 +240,12 @@ class Tile {
 
   showTitle() {
     this.nameEl.textContent = this.title();
+  }
+
+  showVoice() {
+    const on = voice.targets.has(this.dev.id);
+    this.voiceBtn.classList.toggle("on", on);
+    this.voiceBtn.textContent = on ? "Voice ●" : "Connect Voice";
   }
 
   blank() {
@@ -741,6 +757,107 @@ document.addEventListener("keydown", (e) => {
   if (open.length) closeWindow(open.reduce((a, b) => (+a.el.style.zIndex > +b.el.style.zIndex ? a : b)));
 });
 addEventListener("resize", () => tiles.forEach((t) => t.win && winPlace(t)));
+
+// ---------- Voice: the laptop microphone → the chosen headsets (app 0.5.9+) ----------
+// «Connect Voice» on a tile adds/removes that headset; «Voice all» / «Voice off» — all at once. While at least
+// one headset is chosen, the microphone is live: PCM 16 bit, mono, 16 kHz, 40 ms pieces → server /voice → headsets.
+// The microphone needs a secure page: localhost or https (Tailscale).
+const voice = { targets: new Set(), ws: null, ctx: null, stream: null, starting: null };
+const VOICE_WORKLET = `
+class Pcm16k extends AudioWorkletProcessor {
+  constructor(o) { super(); this.step = o.processorOptions.rate / 16000; this.acc = 0; this.cnt = 0; this.t = 0;
+                   this.buf = new Int16Array(640); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) for (let i = 0; i < ch.length; i++) {
+      this.acc += ch[i]; this.cnt++; this.t += 1;
+      if (this.t >= this.step) { // average of the input samples = simple low-pass before going down to 16 kHz
+        let v = this.acc / this.cnt; this.acc = 0; this.cnt = 0; this.t -= this.step;
+        v = v > 1 ? 1 : v < -1 ? -1 : v;
+        this.buf[this.n++] = v < 0 ? v * 0x8000 : v * 0x7fff;
+        if (this.n === this.buf.length) { this.port.postMessage(this.buf.buffer, [this.buf.buffer]); this.buf = new Int16Array(640); this.n = 0; }
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("pcm16k", Pcm16k);`;
+
+function voiceStatus(text, err) {
+  const el = $("voiceState");
+  el.textContent = text;
+  el.classList.toggle("err", !!err);
+}
+function setVoice(list, on) {
+  for (const t of list) on ? voice.targets.add(t.dev.id) : voice.targets.delete(t.dev.id);
+  tiles.forEach((t) => t.showVoice());
+  voiceSync();
+}
+async function voiceSync() {
+  const n = voice.targets.size;
+  if (n && !voice.ctx && !voice.starting) voice.starting = voiceStart().finally(() => { voice.starting = null; });
+  if (voice.starting) await voice.starting;
+  if (!voice.targets.size) { voiceStop(); if (!$("voiceState").classList.contains("err")) voiceStatus(""); return; }
+  if (!voice.ctx) return; // microphone failed: voiceStart showed why
+  voiceStatus(`🎙 Voice → ${voice.targets.size}`);
+  if (voice.ws && voice.ws.readyState === 1) voice.ws.send(JSON.stringify({ targets: [...voice.targets] }));
+}
+function voiceFail(text) {
+  voice.targets.clear();
+  tiles.forEach((t) => t.showVoice());
+  voiceStatus(text, true);
+}
+async function voiceStart() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.AudioWorkletNode) {
+    return voiceFail("Voice needs Chrome and the page on localhost or https (Tailscale)");
+  }
+  try {
+    voice.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch {
+    return voiceFail("No microphone: allow the microphone for this page (icon in the address bar)");
+  }
+  try {
+    const ctx = new AudioContext();
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([VOICE_WORKLET], { type: "application/javascript" })));
+    const node = new AudioWorkletNode(ctx, "pcm16k", { processorOptions: { rate: ctx.sampleRate } });
+    node.port.onmessage = (e) => {
+      const ws = voice.ws;
+      if (ws && ws.readyState === 1 && ws.bufferedAmount < 64 * 1024) ws.send(e.data); // never pile up delay
+    };
+    const mute = ctx.createGain(); mute.gain.value = 0; // the graph must reach the speakers to run; silent
+    ctx.createMediaStreamSource(voice.stream).connect(node);
+    node.connect(mute).connect(ctx.destination);
+    if (ctx.state === "suspended") await ctx.resume();
+    voice.ctx = ctx;
+  } catch (e) {
+    voiceStop();
+    return voiceFail("Cannot start the microphone: " + (e && e.message ? e.message : e));
+  }
+  voiceConnect();
+}
+function voiceConnect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/voice`);
+  ws.binaryType = "arraybuffer";
+  voice.ws = ws;
+  ws.onopen = () => ws.send(JSON.stringify({ targets: [...voice.targets] }));
+  ws.onclose = () => {
+    if (voice.ws !== ws) return;
+    voice.ws = null;
+    if (voice.targets.size && voice.ctx) { voiceStatus("🎙 Voice: reconnecting…", true); setTimeout(() => { if (voice.ctx && !voice.ws) { voiceConnect(); voiceSync(); } }, 2000); }
+  };
+}
+function voiceStop() {
+  const ws = voice.ws; voice.ws = null;
+  try { ws && ws.close(); } catch {}
+  try { voice.stream && voice.stream.getTracks().forEach((t) => t.stop()); } catch {}
+  try { voice.ctx && voice.ctx.close(); } catch {}
+  voice.stream = null; voice.ctx = null;
+}
+$("voiceAll").onclick = () => { voiceStatus(""); setVoice(tiles, true); };
+$("voiceOff").onclick = () => setVoice(tiles, false);
 
 function updateSummary() {
   const live = tiles.filter((t) => t.active).length;

@@ -262,14 +262,22 @@ func run(u, host string, idx int) error {
 		rtt time.Duration
 	}
 	var samples []sample
+	voiceBytes := 0 // teacher's voice received since the last report
 	var winRtt []time.Duration
 	errc := make(chan error, 1)
 	go func() {
 		for {
-			_, m, err := c.ReadMessage()
+			mt, m, err := c.ReadMessage()
 			if err != nil {
 				errc <- err
 				return
+			}
+			// Teacher's voice (server → headset, app 0.5.9+): type byte 3 + PCM 16 kHz. Count it like the headset hears it.
+			if mt == websocket.BinaryMessage && len(m) > 1 && m[0] == 3 {
+				mu.Lock()
+				voiceBytes += len(m) - 1
+				mu.Unlock()
+				continue
 			}
 			var w struct {
 				Type   string
@@ -391,6 +399,14 @@ func run(u, host string, idx int) error {
 					avg.Milliseconds(), max.Milliseconds(), inflight, waited)
 			} else {
 				fmt.Printf("%s  idle: nobody is watching (press Start on the tile)\n", now.Format("15:04:05"))
+			}
+			mu.Lock()
+			vb := voiceBytes
+			voiceBytes = 0
+			mu.Unlock()
+			if vb > 0 {
+				fmt.Printf("%s  %s: teacher's voice %.1f KB/s (%.0f ms of sound per second)\n",
+					now.Format("15:04:05"), name, float64(vb)/1024/sec, float64(vb)/32/sec)
 			}
 			sent, bytesSent, waited, lastReport = 0, 0, 0, now
 		}

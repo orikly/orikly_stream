@@ -77,6 +77,7 @@ type device struct {
 	subs       map[*subscriber]struct{}
 	lastKeyAsk time.Time
 	net        netCounters
+	voice      chan []byte // голос учителя для этих очков (voice.go), создаётся при первом использовании
 }
 
 type hub struct {
@@ -589,6 +590,7 @@ func main() {
 	mux.HandleFunc("/api/classes", localOnly(handleClasses))
 	mux.HandleFunc("/stream/", localOnly(handleStream))
 	mux.HandleFunc("/view/", localOnly(handleView))
+	mux.HandleFunc("/voice", localOnly(handleVoice))
 	mux.HandleFunc("/", localOnly(handleIndex))
 
 	keepAwake() // Windows

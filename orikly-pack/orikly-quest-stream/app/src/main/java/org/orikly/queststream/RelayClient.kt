@@ -11,6 +11,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -146,6 +147,13 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
                                 if (msg.optBoolean("key")) StreamState.onKeyFrameRequest?.invoke()
                             }
                         }
+                    }
+                }
+
+                // Бинарные сообщения от сервера (с 0.5.9): 1 байт типа + данные. 3 = голос учителя (PCM 16 кГц).
+                override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                    if (bytes.size > 1 && bytes[0].toInt() == VOICE_TYPE) {
+                        VoicePlayer.feed(ctx, bytes.substring(1).toByteArray())
                     }
                 }
 
@@ -342,6 +350,7 @@ class RelayClient(private val ctx: Context, url: String, key: String) {
     }
 
     companion object {
+        private const val VOICE_TYPE = 3
         private const val TAG = "OriklyRelay"
         private const val MIN_IN_FLIGHT = 3
         private const val MAX_IN_FLIGHT = 16
