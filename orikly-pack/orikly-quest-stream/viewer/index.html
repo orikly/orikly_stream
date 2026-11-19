@@ -43,7 +43,7 @@ const CONFIG = {
   .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
           display: flex; flex-direction: column; }
   .screen { position: relative; aspect-ratio: 16 / 9; background: var(--tile); cursor: zoom-in; }
-  /* absolute: in the expanded view the canvas must not stretch the flex box (top and bottom were cut off) */
+  /* absolute: in an HQ window the canvas must not stretch the flex box (top and bottom were cut off) */
   .screen canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
   .screen .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
                      color: #bbb; font-size: 13px; text-align: center; padding: 12px; pointer-events: none; }
@@ -56,9 +56,18 @@ const CONFIG = {
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
   .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
   .info { font-size: 12px; }
-  /* expanded view */
-  .tile.expanded { position: fixed; inset: 0; z-index: 10; border-radius: 0; border: 0; }
-  .tile.expanded .screen { flex: 1; min-height: 0; aspect-ratio: auto; cursor: zoom-out; }
+  /* HQ window: a tile opened from the grid floats over the page in high quality. Drag the picture to move it,
+     drag the top-right corner to resize it, click the picture to put it back into the grid. */
+  .tile.win { position: fixed; z-index: 10; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+  .tile.win .screen { flex: 1; min-height: 0; aspect-ratio: auto; cursor: move; touch-action: none; }
+  .tile.win .diag { display: none; }
+  .grip { position: absolute; top: 0; right: 0; width: 34px; height: 34px; display: none; z-index: 2;
+          align-items: center; justify-content: center; cursor: nesw-resize; touch-action: none;
+          background: rgba(0,0,0,.55); color: #fff; font-size: 20px; border-bottom-left-radius: 8px; user-select: none; }
+  .tile.win .grip { display: flex; }
+  .hqbadge { position: absolute; bottom: 8px; left: 8px; background: var(--accent); color: #fff; font-size: 11px;
+             font-weight: 700; padding: 2px 6px; border-radius: 4px; display: none; pointer-events: none; }
+  .tile.hqon .hqbadge { display: block; }
   .diag { font-size: 11px; }
   /* headset outside the lesson app */
   .tile.left { border-color: var(--bad); box-shadow: 0 0 0 3px var(--bad); }
@@ -183,7 +192,8 @@ class Tile {
     this.el.className = "tile";
     this.el.innerHTML = `
       <div class="screen"><canvas width="480" height="480"></canvas>
-        <div class="overlay">Idle</div><div class="rec">● REC</div></div>
+        <div class="overlay">Idle</div><div class="rec">● REC</div><div class="hqbadge">HQ</div>
+        <div class="grip" title="Drag to resize">⤢</div></div>
       <div class="meta">
         <div class="row"><span class="name"></span><button class="toggle primary">Start</button></div>
         <div class="row info"><span class="state"><span class="dot"></span><span class="stext">Checking…</span></span>
@@ -208,7 +218,7 @@ class Tile {
     this.nameEl.style.cursor = "pointer";
     this.nameEl.onclick = () => renameTile(this);
     this.btn.onclick = () => (this.active ? this.stop() : this.start($("recordToggle").checked));
-    this.el.querySelector(".screen").onclick = () => toggleExpand(this);
+    hqWindowControls(this);
     this.blank();
   }
 
@@ -352,10 +362,11 @@ class Tile {
     }, 1000);
   }
 
-  // Expanded tile asks the headset for the high-quality stream (?hq=1), grid uses the normal one.
+  // HQ window asks the headset for the high-quality stream (?hq=1), the grid uses the normal one.
   setHQ(on) {
     if (this.hq === on) return;
     this.hq = on;
+    this.el.classList.toggle("hqon", on);
     if (this.active) { this.abort?.abort(); this.connect(); }
   }
 
@@ -646,13 +657,90 @@ async function pollServer() {
 }
 try { JSON.parse(localStorage.getItem(KNOWN_KEY) || "[]").forEach(addTile); } catch {}
 
-let expanded = null;
-function toggleExpand(tile) {
-  if (expanded) { expanded.el.classList.remove("expanded"); expanded.setHQ(false); }
-  expanded = expanded === tile ? null : tile;
-  if (expanded) { expanded.el.classList.add("expanded"); expanded.setHQ(true); }
+// ---------- HQ windows ----------
+// Click a tile in the grid: it opens over the whole screen in high quality. Drag its top-right corner to make it
+// smaller, drag the picture to move it. Any number of tiles can be open like this at once, each in HQ.
+// Click the picture of a window (without dragging): the tile goes back to its place in the grid, normal quality.
+const WIN_MIN_W = 240, WIN_MIN_H = 180, DRAG_PX = 5;
+let winTop = 10;
+function winFront(t) { t.el.style.zIndex = String(++winTop); }
+function winPlace(t) {
+  const r = t.win, vw = innerWidth, vh = innerHeight;
+  r.w = Math.max(WIN_MIN_W, Math.min(r.w, vw));
+  r.h = Math.max(WIN_MIN_H, Math.min(r.h, vh));
+  r.x = Math.max(0, Math.min(r.x, vw - r.w));
+  r.y = Math.max(0, Math.min(r.y, vh - r.h));
+  Object.assign(t.el.style, { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px" });
 }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && expanded) toggleExpand(expanded); });
+function openWindow(t) {
+  if (t.win) return;
+  t.win = { x: 0, y: 0, w: innerWidth, h: innerHeight };
+  t.el.classList.add("win");
+  winPlace(t);
+  winFront(t);
+  t.setHQ(true);
+}
+function closeWindow(t) {
+  if (!t.win) return;
+  t.win = null;
+  t.el.classList.remove("win");
+  for (const k of ["left", "top", "width", "height", "zIndex"]) t.el.style[k] = "";
+  t.setHQ(false);
+}
+// Pointer drag helper: calls onMove(dx, dy) after the pointer moved more than DRAG_PX; onEnd(moved) at the end.
+function dragFrom(el, e, onMove, onEnd) {
+  const sx = e.clientX, sy = e.clientY;
+  let moved = false;
+  try { el.setPointerCapture(e.pointerId); } catch {}
+  const move = (ev) => {
+    const dx = ev.clientX - sx, dy = ev.clientY - sy;
+    if (!moved && Math.hypot(dx, dy) < DRAG_PX) return;
+    moved = true;
+    onMove(dx, dy);
+  };
+  const end = () => {
+    el.removeEventListener("pointermove", move);
+    el.removeEventListener("pointerup", end);
+    el.removeEventListener("pointercancel", end);
+    onEnd(moved);
+  };
+  el.addEventListener("pointermove", move);
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+}
+function hqWindowControls(t) {
+  const screen = t.el.querySelector(".screen"), grip = t.el.querySelector(".grip");
+  screen.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || e.target === grip) return;
+    if (!t.win) { dragFrom(screen, e, () => {}, (moved) => { if (!moved) openWindow(t); }); return; }
+    winFront(t);
+    const start = { ...t.win };
+    dragFrom(screen, e,
+      (dx, dy) => { t.win.x = start.x + dx; t.win.y = start.y + dy; winPlace(t); },
+      (moved) => { if (!moved) closeWindow(t); });
+  });
+  // Top-right corner: the right edge and the top edge follow the pointer.
+  grip.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || !t.win) return;
+    e.stopPropagation();
+    winFront(t);
+    const start = { ...t.win };
+    dragFrom(grip, e, (dx, dy) => {
+      t.win.w = Math.max(WIN_MIN_W, Math.min(start.w + dx, innerWidth - start.x));
+      const h = Math.max(WIN_MIN_H, Math.min(start.h - dy, start.y + start.h));
+      t.win.y = start.y + start.h - h;
+      t.win.h = h;
+      winPlace(t);
+    }, () => {});
+  });
+}
+// Esc puts the top window back into the grid.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  const open = tiles.filter((t) => t.win);
+  if (open.length) closeWindow(open.reduce((a, b) => (+a.el.style.zIndex > +b.el.style.zIndex ? a : b)));
+});
+addEventListener("resize", () => tiles.forEach((t) => t.win && winPlace(t)));
 
 function updateSummary() {
   const live = tiles.filter((t) => t.active).length;
