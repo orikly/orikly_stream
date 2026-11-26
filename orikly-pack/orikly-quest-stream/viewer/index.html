@@ -258,16 +258,17 @@ class Tile {
     this.stext.textContent = text;
   }
 
-  async start(record) {
+  async start(record, ask) {
     if (this.active) return;
     this.active = true;
     this.btn.textContent = "Stop";
     this.btn.className = "toggle danger";
     this.overlay.textContent = "Connecting…";
-    // Permission must be asked inside the click; recording itself starts on the first frame,
-    // so the video gets the real frame size from the start.
+    // The video never waits for the folder permission: after a page reload Chrome asks it again with a small
+    // bubble near the address bar, and until someone answered, the tile used to stay on «Connecting…» forever.
+    // The permission is asked here, inside the click; recording starts on the first frame and waits for it a little.
     this.wantRecord = record;
-    this.canWriteFolder = record && (await ensureFolderPermission());
+    this.folderAsk = record ? (ask || ensureFolderPermission()) : Promise.resolve(false);
     this.connect();
     updateSummary();
   }
@@ -428,6 +429,13 @@ class Tile {
   }
 
   async startRecording() {
+    // Folder permission (asked at Start): wait for the answer up to 4 s, else record in memory — download on Stop.
+    this.canWriteFolder = await Promise.race([this.folderAsk || Promise.resolve(false),
+      new Promise((r) => setTimeout(() => r(false), 4000))]);
+    if (!this.wantRecord) return; // stopped meanwhile
+    if (folder && !this.canWriteFolder) {
+      $("folderName").textContent = `Folder: ${folder.name} — not allowed: recordings will download on stop (press Choose folder… to allow)`;
+    }
     const mime = pickMime();
     if (!mime) { warn("This browser cannot record video. Use Chrome."); return; }
     const ext = mime.startsWith("video/mp4") ? "mp4" : "webm";
@@ -872,10 +880,10 @@ function updateSummary() {
   $("summary").textContent = live ? `Active: ${live} · Recording: ${rec}` : "";
 }
 
-$("startAll").onclick = async () => {
+$("startAll").onclick = () => {
   const record = $("recordToggle").checked;
-  if (record) await ensureFolderPermission(); // ask once for all tiles
-  tiles.forEach((t) => t.start(record));
+  const ask = record ? ensureFolderPermission() : null; // asked once for all tiles; the video does not wait for it
+  tiles.forEach((t) => t.start(record, ask));
 };
 $("stopAll").onclick = () => tiles.forEach((t) => t.stop());
 $("pickFolder").onclick = pickFolder;
